@@ -2,8 +2,7 @@
 ///
 /// This module provides helpers for performing multiple operations efficiently,
 /// particularly useful for dashboard syncing and bulk verifications.
-
-use soroban_sdk::{String, Address, Env};
+use soroban_sdk::String;
 
 /// Result of a single batch operation.
 #[derive(Clone, Debug)]
@@ -46,11 +45,9 @@ pub struct BatchSummary {
 }
 
 impl BatchSummary {
-    /// Calculate summary from results.
-    pub fn from_results(results: &[BatchOperationResult]) -> Self {
-        let total = results.len() as u32;
-        let successful = results.iter().filter(|r| r.success).count() as u32;
-        let failed = total - successful;
+    /// Calculate summary from count.
+    pub fn new(total: u32, successful: u32) -> Self {
+        let failed = total.saturating_sub(successful);
         let success_rate = if total > 0 {
             ((successful as u64 * 100) / (total as u64)) as u32
         } else {
@@ -100,42 +97,17 @@ impl BatchConfig {
     }
 }
 
-/// Chunk an iterator into fixed-size batches.
-pub fn chunk_into_batches<T: Clone>(items: &[T], batch_size: usize) -> Vec<Vec<T>> {
-    let mut batches = Vec::new();
-    for chunk in items.chunks(batch_size) {
-        batches.push(chunk.to_vec());
-    }
-    batches
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_batch_summary() {
-        let results = vec![
-            BatchOperationResult::success(String::from_str(&env, "user1")),
-            BatchOperationResult::success(String::from_str(&env, "user2")),
-            BatchOperationResult::failed(String::from_str(&env, "user3"), String::from_str(&env, "error")),
-        ];
-
-        let summary = BatchSummary::from_results(&results);
+        let summary = BatchSummary::new(3, 2);
         assert_eq!(summary.total, 3);
         assert_eq!(summary.successful, 2);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.success_rate, 66);
-    }
-
-    #[test]
-    fn test_chunk_into_batches() {
-        let items = vec![1, 2, 3, 4, 5];
-        let batches = chunk_into_batches(&items, 2);
-        assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0], vec![1, 2]);
-        assert_eq!(batches[1], vec![3, 4]);
-        assert_eq!(batches[2], vec![5]);
     }
 
     #[test]

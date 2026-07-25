@@ -14,7 +14,11 @@ pub struct Version {
 impl Version {
     /// Create a new version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Version { major, minor, patch }
+        Version {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse a version from a tuple (used for storage).
@@ -119,6 +123,8 @@ impl CompatibilityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
+    use alloc::format;
 
     #[test]
     fn test_version_comparison() {
@@ -144,7 +150,7 @@ mod tests {
     #[test]
     fn test_version_bumps() {
         let v1_2_3 = Version::new(1, 2, 3);
-        
+
         assert_eq!(v1_2_3.bump_patch(), Version::new(1, 2, 4));
         assert_eq!(v1_2_3.bump_minor(), Version::new(1, 3, 0));
         assert_eq!(v1_2_3.bump_major(), Version::new(2, 0, 0));
