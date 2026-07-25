@@ -359,6 +359,47 @@ impl TrustBridgeContract {
         Ok(result)
     }
 
+    /// Exports paginated records with cursor. Admin-only (Issue #1).
+    pub fn get_registered_paginated(
+        env: Env,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<ExportPage, ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        get_registered_paginated_internal(&env, cursor, limit)
+    }
+
+    /// Public paginated reads for indexers and dashboard consumers (Issue #3).
+    /// Hardened with pause checks and capped limits.
+    pub fn get_public_paginated(
+        env: Env,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<ExportPage, ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        get_registered_paginated_internal(&env, cursor, limit)
+    }
+
+    /// Toggles contract pause state. Admin-only (Issue #3).
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        set_paused_state(&env, paused);
+        Ok(())
+    }
+
+    /// Checks if the contract is paused (Issue #3).
+    pub fn is_paused(env: Env) -> bool {
+        storage_is_paused(&env)
+    }
+
     /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
     pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;

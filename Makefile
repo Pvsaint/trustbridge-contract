@@ -22,7 +22,7 @@ PKG_MANAGER  ?= pnpm
         invoke-register invoke-lookup invoke-init invoke-stats install-target
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
 
 install-target: ## Install wasm compilation targets
 	rustup target add wasm32v1-none wasm32-unknown-unknown
@@ -126,3 +126,56 @@ invoke-stats: require-contract-id ## Read registry statistics (read-only)
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		-- get_stats
+
+invoke-verify: ## Mark a contributor as verified (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- verify --github-username $(GITHUB_USER)
+
+invoke-revoke-verification: ## Revoke contributor verification (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- revoke_verification --github-username $(GITHUB_USER)
+
+invoke-get-all-registered: ## Export full registry mapping (admin-only) (SOURCE=admin, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_all_registered
+
+invoke-export-paginated: ## Export paginated records with cursor (admin-only) (CURSOR, LIMIT, SOURCE=admin, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_registered_paginated --cursor $(CURSOR) --limit $(LIMIT)
+
+invoke-public-paginated: ## Public paginated read for indexer/dashboard (CURSOR, LIMIT, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_public_paginated --cursor $(CURSOR) --limit $(LIMIT)
+
+invoke-remove: ## Remove a registration (CALLER, GITHUB_USER, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- remove --caller $(CALLER) --github-username $(GITHUB_USER)
+
+invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRACT_ID)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- set_paused --paused $(PAUSED)

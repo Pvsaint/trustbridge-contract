@@ -1,14 +1,13 @@
-# Dashboard Sync Notes
+# Dashboard & Indexer Sync Guide
 
-The dashboard can combine contract state with Horizon checks to show payout readiness.
+The TrustBridge dashboard and indexer consumers combine Soroban contract state with Horizon API checks to ensure secure, efficient payout readiness and contributor index synchronization.
 
-## Recommended sync order
+## Features & Integration Overview
 
-1. Read registered contributors from the contract.
-2. Normalize GitHub usernames for display and filtering.
-3. Query Horizon for funding, trustline, and reserve status.
-4. Cache readiness results with a short TTL.
-5. Re-check before payout export.
+1. **Chunked Username Index (Issue #2)**: Contributor usernames are stored in chunked persistent vectors (100 items per chunk) to avoid storage entry size limits at scale.
+2. **Paginated Cursor Export (Issue #1)**: Export endpoints (`get_registered_paginated` and `get_public_paginated`) accept a zero-based offset `cursor` and item count `limit` to retrieve records deterministically without exceeding gas or frame limits.
+3. **Hardened Public Reads & Emergency Pause (Issue #3)**: `get_public_paginated` allows unauthenticated dashboard reads with capped limits (`MAX_PAGE_LIMIT = 100`) and enforces emergency contract pause states.
+4. **Makefile Admin Invoke Targets (Issue #30)**: Convenient CLI commands for operators to query and manage registry state.
 
 Contract verification proves the registry entry was approved; Horizon readiness proves the address can receive the selected asset.
 
