@@ -14,6 +14,9 @@ pub enum ContractError {
     CooldownActive = 8,
     InvalidVersion = 9,
     InvalidRole = 10,
+    /// `batch_verify` was called with an empty batch, or one larger than
+    /// `BatchConfig::max_batch_size`.
+    InvalidBatchSize = 12,
 }
 
 impl ContractError {

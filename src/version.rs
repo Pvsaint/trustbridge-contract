@@ -14,14 +14,31 @@ pub struct Version {
     pub patch: u32,
 }
 
+/// First contract version exposing the `batch_verify` entry point.
+///
+/// `batch_verify` is additive — it introduces a new function without changing
+/// any existing signature — so it lands as a minor bump. Off-chain callers
+/// (dashboard, indexer, the generated TypeScript bindings) should gate on
+/// `Version::supports_batch_verify` rather than assuming the function exists,
+/// since a contract deployed at 1.0.0 will reject the invocation outright.
+pub const BATCH_VERIFY_MIN_VERSION: Version = Version::new(1, 1, 0);
+
 impl Version {
     /// Create a new version.
-    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
+    pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
         Version {
             major,
             minor,
             patch,
         }
+    }
+
+    /// Whether this version exposes the `batch_verify` entry point.
+    ///
+    /// Lets a caller branch between one batched invocation and N individual
+    /// `verify` calls without probing the contract and interpreting a failure.
+    pub fn supports_batch_verify(&self) -> bool {
+        self.is_compatible_with(BATCH_VERIFY_MIN_VERSION)
     }
 
     /// Parse a version from a tuple (used for storage).
@@ -220,5 +237,22 @@ mod tests {
         assert_ne!(MigrationState::NotRequired, MigrationState::Pending);
         assert_ne!(MigrationState::InProgress, MigrationState::Completed);
         assert_ne!(MigrationState::Completed, MigrationState::Failed);
+    }
+
+    #[test]
+    fn test_supports_batch_verify() {
+        // Pre-batch_verify deployments must report the capability as absent so
+        // callers fall back to individual verify() calls.
+        assert!(!Version::v1_0_0().supports_batch_verify());
+        assert!(!Version::new(1, 0, 9).supports_batch_verify());
+
+        // The introducing version and anything after it within major 1.
+        assert!(Version::new(1, 1, 0).supports_batch_verify());
+        assert!(Version::new(1, 2, 0).supports_batch_verify());
+        assert!(Version::new(1, 1, 3).supports_batch_verify());
+
+        // A later major carries the capability forward; an earlier one cannot.
+        assert!(Version::new(2, 0, 0).supports_batch_verify());
+        assert!(!Version::new(0, 9, 9).supports_batch_verify());
     }
 }

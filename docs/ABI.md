@@ -27,6 +27,19 @@ struct Stats {
 }
 ```
 
+### BatchSummary
+
+Returned by `batch_verify`. `success_rate` is an integer percentage.
+
+```rust
+struct BatchSummary {
+    total: u32,
+    successful: u32,
+    failed: u32,
+    success_rate: u32,
+}
+```
+
 ### Role (u32 discriminant)
 
 ```rust
@@ -51,6 +64,7 @@ enum Role {
 | 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
+| 12 | `InvalidBatchSize` | `batch_verify` batch is empty or exceeds `max_batch_size` |
 
 ---
 
@@ -191,6 +205,48 @@ Mark a contributor as verified after off-chain GitHub identity confirmation.
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- verify --github-username octocat
+```
+
+---
+
+### `batch_verify(usernames: Vec<String>) -> Result<BatchSummary, ContractError>`
+
+Verify many contributors in a single invocation — the batched form of `verify`,
+for the dashboard-sync workflow where an off-chain job confirms a page of GitHub
+identities at once. Doing that as N separate invocations costs N transactions,
+N signatures and N rounds of ledger overhead; this is one.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidBatchSize` |
+| **Events** | One `VerifiedEvent` per newly verified contributor |
+| **Since** | 1.1.0 — gate on `Version::supports_batch_verify` |
+
+**Partial success is the point.** A username that cannot be verified does not
+abort the batch; it is counted as a failure and the rest proceed. A sync of 100
+contributors must not be lost wholesale because one entry was removed or already
+verified since the off-chain job built its list.
+
+| Outcome | Counted as | Notes |
+|---|---|---|
+| Registered and unverified | `successful` | Record updated, `VerifiedEvent` published |
+| Not registered | `failed` | Skipped, batch continues |
+| Already verified | `failed` | Skipped — idempotent, so re-runs are safe |
+
+Inspect the returned `BatchSummary`: a `success_rate` below 100 means some
+entries need attention, **not** that the batch failed. The errors listed above
+are the only conditions that abort the whole call, and all of them invalidate
+every entry rather than a single one.
+
+`verified` is incremented once for the whole batch rather than per entry —
+nothing between the per-entry writes can observe an intermediate value within a
+single invocation.
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- batch_verify --usernames '["octocat","alice","bob-smith"]'
 ```
 
 ---

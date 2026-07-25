@@ -14,7 +14,9 @@ pub use events::{
     PausedEvent, RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
+pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
 pub use storage::{ContributorRecord, Role, Stats};
+pub use version::{Version, BATCH_VERIFY_MIN_VERSION};
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
@@ -427,6 +429,89 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Verifies many contributors in a single invocation. Admin-only.
+    ///
+    /// This is the batched form of `verify`, for the dashboard-sync workflow
+    /// where an off-chain job confirms a page of GitHub identities at once.
+    /// Doing that as N separate invocations costs N transactions, N signatures
+    /// and N rounds of ledger overhead; here it is one.
+    ///
+    /// **Partial success is the point.** Unlike `verify`, a username that
+    /// cannot be verified does not abort the batch — it is counted as a failure
+    /// and the rest proceed. A sync of 100 contributors must not be lost
+    /// wholesale because one entry was removed or already verified since the
+    /// off-chain job built its list. Callers inspect the returned
+    /// `BatchSummary` to see what landed; `success_rate` of less than 100 means
+    /// some entries need attention, not that the batch failed.
+    ///
+    /// An entry is counted as failed when it is not registered, or is already
+    /// verified. Both are benign and expected in a re-run.
+    ///
+    /// Errors (which *do* abort the whole batch) are limited to conditions that
+    /// invalidate the entire call: uninitialized, paused, unauthorized, or a
+    /// batch size outside `BatchConfig`'s limits.
+    pub fn batch_verify(
+        env: Env,
+        usernames: Vec<String>,
+    ) -> Result<BatchSummary, ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        // Bound the batch before touching storage. An unbounded Vec would let a
+        // single invocation blow the ledger's CPU budget and fail after doing
+        // partial work — the caller could not tell which entries had landed.
+        let total = usernames.len();
+        let config = BatchConfig::default();
+        if !config.is_valid_batch_size(total) {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let mut successful: u32 = 0;
+
+        for username in usernames.iter() {
+            let record = match get_record(&env, &username) {
+                Some(r) => r,
+                // Not registered — skip rather than abort.
+                None => continue,
+            };
+
+            if record.verified {
+                // Already verified — idempotent, so a re-run is harmless.
+                continue;
+            }
+
+            let updated = ContributorRecord {
+                verified: true,
+                ..record
+            };
+            set_record(&env, &username, &updated);
+            successful = successful.saturating_add(1);
+
+            VerifiedEvent {
+                github_username: username.clone(),
+                stellar_address: updated.stellar_address.clone(),
+                timestamp,
+            }
+            .publish(&env);
+        }
+
+        // One counter write for the whole batch instead of one per entry. The
+        // per-entry increments would be redundant: nothing between them can
+        // observe the intermediate values within a single invocation.
+        if successful > 0 {
+            set_verified_count(
+                &env,
+                storage_get_verified_count(&env).saturating_add(successful),
+            );
+        }
+
+        Ok(BatchSummary::new(total, successful))
     }
 
     /// Revokes verification for a registered contributor. Admin-only.
