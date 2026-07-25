@@ -128,6 +128,8 @@ impl CompatibilityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
+    use alloc::format;
 
     #[test]
     fn test_version_comparison() {
