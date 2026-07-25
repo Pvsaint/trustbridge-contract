@@ -8,11 +8,16 @@ extern crate std;
 mod error;
 mod events;
 mod storage;
+mod utils;
 mod version;
 
 pub use error::ContractError;
 pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent, VerificationRevokedEvent};
 pub use storage::{ContributorRecord, Stats};
+pub use utils::{
+    calculate_verification_percentage, eq_ignore_ascii_case, is_empty, is_valid_github_username,
+    MAX_USERNAME_LEN,
+};
 pub use version::{CompatibilityInfo, MigrationState, Version};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
@@ -67,13 +72,23 @@ impl TrustBridgeContract {
     }
 
     /// Registers or updates a GitHub username → Stellar address mapping.
-    /// The caller must authenticate as `stellar_address`.
+    ///
+    /// The caller must authenticate as `stellar_address`. The username must be
+    /// 1 to 39 characters of alphanumerics, hyphens, and underscores, starting
+    /// and ending alphanumeric, or the call fails with `InvalidUsername`.
     pub fn register(
         env: Env,
         github_username: String,
         stellar_address: Address,
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
+
+        // Validate before authenticating: a malformed username is rejected at
+        // the cheapest point, and no signature is spent on a doomed call.
+        if !is_valid_github_username(&github_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
         stellar_address.require_auth();
 
         let timestamp = env.ledger().timestamp();
@@ -731,6 +746,122 @@ mod test {
         assert_eq!(ContractError::NotAuthorized.code(), 3);
         assert_eq!(ContractError::NotRegistered.code(), 4);
         assert_eq!(ContractError::AlreadyVerified.code(), 5);
+        assert_eq!(ContractError::NotVerified.code(), 6);
+        assert_eq!(ContractError::InvalidUsername.code(), 7);
+    }
+
+    // === Username validation
+
+    #[test]
+    fn test_register_accepts_well_formed_usernames() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for name in ["a", "octocat", "bob-smith", "user_123", "Octocat42"] {
+                TrustBridgeContract::register(env.clone(), username(&env, name), user.clone())
+                    .unwrap();
+            }
+
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 5);
+        });
+    }
+
+    #[test]
+    fn test_register_rejects_malformed_usernames() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        let too_long = "a".repeat(MAX_USERNAME_LEN as usize + 1);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for name in [
+                "",
+                " ",
+                "-leading",
+                "trailing-",
+                "_leading",
+                "has space",
+                "has@symbol",
+                "has/slash",
+                "new\nline",
+                too_long.as_str(),
+            ] {
+                let result =
+                    TrustBridgeContract::register(env.clone(), username(&env, name), user.clone());
+                assert_eq!(
+                    result,
+                    Err(ContractError::InvalidUsername),
+                    "expected rejection for {name:?}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_rejected_registration_leaves_registry_untouched() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+
+            let result =
+                TrustBridgeContract::register(env.clone(), username(&env, "bad name"), user.clone());
+            assert_eq!(result, Err(ContractError::InvalidUsername));
+
+            // No counter drift, no index leak, no partial record.
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 1);
+            assert_eq!(stats.verified, 0);
+            assert_eq!(
+                TrustBridgeContract::get_all_registered(env.clone()).unwrap().len(),
+                1
+            );
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "bad name")).is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn test_register_validates_before_initialization_check_passes() {
+        let env = Env::default();
+        let user = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // Initialization is still checked first, so an uninitialized
+            // contract reports NotInitialized rather than leaking validation
+            // behavior to unauthenticated callers.
+            let result =
+                TrustBridgeContract::register(env.clone(), username(&env, "bad name"), user.clone());
+            assert_eq!(result, Err(ContractError::NotInitialized));
+        });
+    }
+
+    #[test]
+    fn test_max_length_username_is_accepted() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        let boundary = "a".repeat(MAX_USERNAME_LEN as usize);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, &boundary),
+                user.clone(),
+            )
+            .unwrap();
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+        });
     }
 
 

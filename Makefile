@@ -18,7 +18,7 @@ BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 
 .PHONY: help build build-legacy test fuzz bench bench-export fmt lint check ci clean \
-        deploy-testnet deploy-mainnet bindings bindings-build invoke-version \
+        deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target
 
 help: ## Show this help
@@ -80,7 +80,15 @@ deploy-mainnet: build ## Deploy to Stellar Mainnet (requires explicit ADMIN)
 	@if [ -z "$(ADMIN)" ]; then echo "Set ADMIN to the G-address of the contract admin."; exit 1; fi
 	NETWORK=mainnet ADMIN=$(ADMIN) ./scripts/deploy.sh
 
-invoke-init: ## Initialize contract (CONTRACT_ID and ADMIN required)
+require-contract-id:
+	@if [ -z "$(CONTRACT_ID)" ]; then \
+		echo "ERROR: set CONTRACT_ID=<C...> for this target."; exit 1; \
+	fi
+
+invoke-init: require-contract-id ## Initialize contract (CONTRACT_ID and ADMIN required)
+	@if [ -z "$(ADMIN)" ]; then \
+		echo "ERROR: set ADMIN to the G-address of the contract admin."; exit 1; \
+	fi
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
@@ -88,7 +96,7 @@ invoke-init: ## Initialize contract (CONTRACT_ID and ADMIN required)
 		--send=yes \
 		-- initialize --admin $(ADMIN)
 
-invoke-register: ## Register a GitHub username (GITHUB_USER, STELLAR_ADDR, CONTRACT_ID)
+invoke-register: require-contract-id ## Register a GitHub username (GITHUB_USER, STELLAR_ADDR, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
@@ -98,21 +106,21 @@ invoke-register: ## Register a GitHub username (GITHUB_USER, STELLAR_ADDR, CONTR
 		--github-username $(GITHUB_USER) \
 		--stellar-address $(STELLAR_ADDR)
 
-invoke-lookup: ## Look up a GitHub username (read-only simulation)
+invoke-lookup: require-contract-id ## Look up a GitHub username (read-only simulation)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		-- get_address --github-username $(GITHUB_USER)
 
-invoke-version: ## Read the deployed contract version (read-only)
+invoke-version: require-contract-id ## Read the deployed contract version (read-only)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		-- version
 
-invoke-stats: ## Read registry statistics (read-only)
+invoke-stats: require-contract-id ## Read registry statistics (read-only)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \

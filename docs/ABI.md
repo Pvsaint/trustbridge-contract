@@ -37,6 +37,7 @@ struct Stats {
 | 4 | `NotRegistered` | Username not in registry |
 | 5 | `AlreadyVerified` | Username already verified |
 | 6 | `NotVerified` | Cannot revoke verification because the username is not verified |
+| 7 | `InvalidUsername` | Username is empty, too long, or contains disallowed characters |
 
 ---
 
@@ -67,13 +68,27 @@ Register or update a GitHub username mapping.
 |---|---|
 | **Auth** | `stellar_address` must sign |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `InvalidUsername` |
 | **Events** | `RegisteredEvent` |
 
 Behavior:
 
 - New username → increment `count`, append to `idx`
 - Existing username → update record; reset `verified` if address changed
+
+**Username rules** (enforced on-chain, checked before auth):
+
+| Rule | Value |
+|------|-------|
+| Length | 1 to 39 characters |
+| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
+| First and last character | Must be alphanumeric |
+
+Anything else fails with `InvalidUsername` before any signature is verified and
+before any storage write, so a rejected call leaves counters and the export
+index untouched. Underscores are accepted even though GitHub itself disallows
+them, so registrations made before validation existed stay readable and
+removable.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \

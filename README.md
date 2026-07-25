@@ -93,6 +93,7 @@ trustbridge-contract/
 │   ├── storage.rs      # Storage keys, types, helpers
 │   ├── events.rs       # RegisteredEvent, RemovedEvent, VerifiedEvent
 │   ├── version.rs      # Version, compatibility, migration state
+│   ├── utils.rs        # Username validation helpers
 │   └── error.rs        # ContractError enum
 ├── tests/              # (reserved for integration tests)
 ├── scripts/
@@ -249,7 +250,9 @@ More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
 
 **Events:** `RegisteredEvent`, `RemovedEvent`, `VerifiedEvent`, `VerificationRevokedEvent` — see [docs/ABI.md](docs/ABI.md)
 
-**Errors:** `AlreadyInitialized`, `NotInitialized`, `NotAuthorized`, `NotRegistered`, `AlreadyVerified`, `NotVerified`
+**Errors:** `AlreadyInitialized`, `NotInitialized`, `NotAuthorized`, `NotRegistered`, `AlreadyVerified`, `NotVerified`, `InvalidUsername`
+
+> **Username validation:** `register` accepts 1 to 39 characters of alphanumerics, hyphens, and underscores, starting and ending alphanumeric. Anything else fails with `InvalidUsername` before auth is checked and before any write, so rejected calls leave the registry untouched. See [docs/SECURITY.md](docs/SECURITY.md#input-validation).
 
 ### TypeScript bindings
 
