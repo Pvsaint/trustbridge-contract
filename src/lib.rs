@@ -976,6 +976,94 @@ mod test {
         });
     }
 
+    // Reference event indexer hardening (Contract Wave #33).
+    //
+    // A downstream indexer keys off the emitted events for admin actions
+    // (register/remove/verify/revoke_verification). These tests pin the
+    // event *count* and *topic* for each admin-adjacent mutation so an
+    // indexer built against today's event shape doesn't silently drop or
+    // duplicate records on a future refactor.
+
+    #[test]
+    fn indexer_register_emits_exactly_one_registered_event() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        assert_eq!(env.events().all().len(), 1);
+    }
+
+    #[test]
+    fn indexer_remove_emits_exactly_one_removed_event() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        let before = env.events().all().len();
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        assert_eq!(env.events().all().len(), before + 1);
+    }
+
+    #[test]
+    fn indexer_verify_and_revoke_each_emit_one_event() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        let after_register = env.events().all().len();
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+        assert_eq!(env.events().all().len(), after_register + 1);
+
+        let after_verify = env.events().all().len();
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(env.clone(), username(&env, "octocat")).unwrap();
+        });
+        assert_eq!(env.events().all().len(), after_verify + 1);
+    }
+
+    #[test]
+    fn indexer_repeated_registration_of_same_user_stays_idempotent_in_event_count() {
+        // Re-registering the same (username, address) pair must not emit
+        // duplicate index entries downstream: still exactly one event per
+        // call, and the registry count does not double-count.
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+        let after_first = env.events().all().len();
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+        });
+
+        assert_eq!(env.events().all().len(), after_first + 1);
+    }
+
     #[test]
     fn auth_get_address_and_get_stats_are_public_reads() {
         // get_address() and get_stats() intentionally require no auth at
