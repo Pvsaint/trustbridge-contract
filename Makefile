@@ -84,3 +84,12 @@ invoke-stats: ## Read registry statistics (read-only)
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		-- get_stats
+
+bench-empty-export: ## Benchmark export/get_all_registered on a freshly-deployed, empty registry (CONTRACT_ID required)
+	@if [ -z "$(CONTRACT_ID)" ]; then echo "Set CONTRACT_ID to a deployed, initialized contract."; exit 1; fi
+	@echo "Benchmarking get_all_registered against an empty registry..."
+	@time $(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_all_registered
