@@ -8,17 +8,28 @@ extern crate std;
 mod error;
 mod events;
 mod storage;
+mod version;
 
 pub use error::ContractError;
 pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent, VerificationRevokedEvent};
 pub use storage::{ContributorRecord, Stats};
+pub use version::{CompatibilityInfo, MigrationState, Version};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::storage::{
     add_to_index, get_admin, get_count, get_index, get_record, get_stats as read_stats, has_record,
-    get_verified_count as storage_get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
-    set_record, set_verified_count, ADMIN_KEY,
+    get_verified_count as storage_get_verified_count, get_version, remove_from_index, remove_record,
+    require_initialized, set_count, set_record, set_verified_count, set_version, ADMIN_KEY,
+};
+
+/// Version of this contract build. Written to storage by `initialize` so
+/// clients and bindings consumers can read what is actually deployed rather
+/// than what they assume is deployed.
+pub const CONTRACT_VERSION: Version = Version {
+    major: 1,
+    minor: 0,
+    patch: 0,
 };
 
 #[contract]
@@ -35,8 +46,24 @@ impl TrustBridgeContract {
         env.storage().instance().set(&ADMIN_KEY, &admin);
         set_count(&env, 0);
         set_verified_count(&env, 0);
+        set_version(&env, &CONTRACT_VERSION.to_tuple());
 
         Ok(())
+    }
+
+    /// Returns the deployed contract version as `(major, minor, patch)`.
+    ///
+    /// Instances initialized before versioning was added carry no stored
+    /// version and report the build constant instead.
+    pub fn version(env: Env) -> (u32, u32, u32) {
+        get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
+    }
+
+    /// Reports whether the deployed contract satisfies a client's minimum
+    /// required version. Bindings consumers call this before invoking, so a
+    /// stale client fails fast instead of on an unexpected ABI.
+    pub fn is_compatible(env: Env, major: u32, minor: u32, patch: u32) -> bool {
+        Version::from_tuple(Self::version(env)).is_compatible_with(Version::new(major, minor, patch))
     }
 
     /// Registers or updates a GitHub username → Stellar address mapping.
@@ -1136,6 +1163,80 @@ mod test {
                 assert_eq!(stats.verified, 0);
             });
         }
+    }
+
+    // === Version and bindings surface
+
+    #[test]
+    fn test_version_reports_build_constant() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::version(env.clone()),
+                CONTRACT_VERSION.to_tuple()
+            );
+        });
+    }
+
+    #[test]
+    fn test_version_defaults_before_initialize() {
+        let env = Env::default();
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        // An uninitialized instance has no stored version, so the getter falls
+        // back to the build constant rather than panicking.
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::version(env.clone()),
+                CONTRACT_VERSION.to_tuple()
+            );
+        });
+    }
+
+    #[test]
+    fn test_is_compatible_accepts_older_minimum() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::is_compatible(env.clone(), 1, 0, 0));
+            assert!(TrustBridgeContract::is_compatible(env.clone(), 0, 9, 0));
+        });
+    }
+
+    #[test]
+    fn test_is_compatible_rejects_newer_minimum() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        // A bindings client built against a newer contract must be told no.
+        env.as_contract(&contract_id, || {
+            assert!(!TrustBridgeContract::is_compatible(env.clone(), 1, 1, 0));
+            assert!(!TrustBridgeContract::is_compatible(env.clone(), 2, 0, 0));
+            assert!(!TrustBridgeContract::is_compatible(env.clone(), 1, 0, 1));
+        });
+    }
+
+    #[test]
+    fn test_version_survives_registry_mutations() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat"))
+                .unwrap();
+
+            assert_eq!(
+                TrustBridgeContract::version(env.clone()),
+                CONTRACT_VERSION.to_tuple()
+            );
+        });
     }
 
     // === Cost benchmarks

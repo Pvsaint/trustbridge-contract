@@ -14,9 +14,11 @@ CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
 BENCH_OUT   ?= bench-results.txt
+BINDINGS_DIR ?= bindings/typescript
+PKG_MANAGER  ?= pnpm
 
 .PHONY: help build build-legacy test fuzz bench bench-export fmt lint check ci clean \
-        deploy-testnet deploy-mainnet \
+        deploy-testnet deploy-mainnet bindings bindings-build invoke-version \
         invoke-register invoke-lookup invoke-init invoke-stats install-target
 
 help: ## Show this help
@@ -56,7 +58,20 @@ ci: check ## Alias for CI-equivalent checks
 
 clean: ## Remove build artifacts
 	cargo clean
-	rm -rf target/wasm32v1-none target/wasm32-unknown-unknown
+	rm -rf target/wasm32v1-none target/wasm32-unknown-unknown $(BINDINGS_DIR)
+
+bindings: ## Generate the TypeScript bindings package (CONTRACT_ID required)
+	@if [ -z "$(CONTRACT_ID)" ]; then \
+		echo "Set CONTRACT_ID=<C...> to generate bindings."; exit 1; \
+	fi
+	$(STELLAR) contract bindings typescript \
+		--network $(NETWORK) \
+		--contract-id $(CONTRACT_ID) \
+		--output-dir $(BINDINGS_DIR) \
+		--overwrite
+
+bindings-build: bindings ## Generate and build the TypeScript bindings package
+	cd $(BINDINGS_DIR) && $(PKG_MANAGER) install && $(PKG_MANAGER) run build
 
 deploy-testnet: build ## Deploy to Stellar Testnet
 	NETWORK=testnet ADMIN=$(ADMIN) ./scripts/deploy.sh
@@ -89,6 +104,13 @@ invoke-lookup: ## Look up a GitHub username (read-only simulation)
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		-- get_address --github-username $(GITHUB_USER)
+
+invoke-version: ## Read the deployed contract version (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- version
 
 invoke-stats: ## Read registry statistics (read-only)
 	$(STELLAR) contract invoke \

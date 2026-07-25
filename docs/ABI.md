@@ -233,6 +233,106 @@ data:   { stellar_address, timestamp }
 
 ---
 
+### `version() -> (u32, u32, u32)`
+
+Returns the deployed contract version as `(major, minor, patch)`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+The version is written to instance storage by `initialize`. Instances deployed
+before version tracking existed carry no stored version and report the build
+constant `1.0.0` instead.
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- version
+```
+
+---
+
+### `is_compatible(major: u32, minor: u32, patch: u32) -> bool`
+
+Reports whether the deployed contract satisfies a client's minimum required
+version.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+Rules:
+
+- A higher major version is always compatible with a lower required major
+- Within the same major, the deployed minor and patch must be at least the
+  required ones
+- A lower deployed version than required returns `false`
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- is_compatible --major 1 --minor 0 --patch 0
+```
+
+---
+
+## TypeScript Bindings
+
+The Stellar CLI generates a typed client package straight from the deployed
+WASM, so the bindings never drift from the contract that produced them.
+
+```bash
+make bindings CONTRACT_ID=$CONTRACT_ID NETWORK=testnet
+make bindings-build CONTRACT_ID=$CONTRACT_ID NETWORK=testnet   # also installs and compiles
+```
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CONTRACT_ID` | *(required)* | Deployed contract to read the ABI from |
+| `NETWORK` | `testnet` | Network the contract lives on |
+| `BINDINGS_DIR` | `bindings/typescript` | Output directory for the generated package |
+| `PKG_MANAGER` | `pnpm` | Package manager used by `bindings-build` |
+
+The output directory is git-ignored. Generated bindings are a build artifact,
+not source: regenerate them after every deploy rather than committing them.
+
+### Version handshake
+
+Call `is_compatible` once at client startup and fail fast when the deployed
+contract is older than the bindings expect:
+
+```ts
+const client = new Client({ contractId, networkPassphrase, rpcUrl });
+
+const { result: compatible } = await client.is_compatible({
+  major: 1,
+  minor: 0,
+  patch: 0,
+});
+
+if (!compatible) {
+  const { result: deployed } = await client.version();
+  throw new Error(
+    `trustbridge-contract ${deployed.join(".")} is older than this client requires`,
+  );
+}
+```
+
+Read-only calls simulate against RPC and never submit a transaction, so the
+handshake costs no fees.
+
+### Regeneration checklist
+
+1. Bump `CONTRACT_VERSION` in `src/lib.rs` for any ABI change.
+2. Deploy, then run `make bindings CONTRACT_ID=...`.
+3. Bump the minimum version in the consuming client's handshake.
+
+A contract change that alters the ABI without a version bump leaves clients
+unable to detect the drift, so the bump is a review blocker.
+
+---
+
 ## Cost and Benchmarks
 
 Every state-changing call consumes ledger CPU instructions and memory. The

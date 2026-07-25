@@ -92,6 +92,7 @@ trustbridge-contract/
 │   ├── lib.rs          # Contract implementation + unit tests
 │   ├── storage.rs      # Storage keys, types, helpers
 │   ├── events.rs       # RegisteredEvent, RemovedEvent, VerifiedEvent
+│   ├── version.rs      # Version, compatibility, migration state
 │   └── error.rs        # ContractError enum
 ├── tests/              # (reserved for integration tests)
 ├── scripts/
@@ -240,11 +241,26 @@ More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
 | `remove(caller, github_username)` | `caller` (registrant or admin) | ✅ | Remove a registration |
 | `get_all_registered()` | Admin | ❌ | Export full registry |
 | `verify(github_username)` | Admin | ✅ | Mark as GitHub-verified |
+| `revoke_verification(github_username)` | Admin | ✅ | Clear a verification |
+| `get_verified_count()` | None | ❌ | Verified registration count |
 | `get_stats()` | None | ❌ | `{ total, verified }` |
+| `version()` | None | ❌ | Deployed version as `(major, minor, patch)` |
+| `is_compatible(major, minor, patch)` | None | ❌ | Client version handshake |
 
-**Events:** `RegisteredEvent`, `RemovedEvent`, `VerifiedEvent` — see [docs/ABI.md](docs/ABI.md)
+**Events:** `RegisteredEvent`, `RemovedEvent`, `VerifiedEvent`, `VerificationRevokedEvent` — see [docs/ABI.md](docs/ABI.md)
 
-**Errors:** `AlreadyInitialized`, `NotInitialized`, `NotAuthorized`, `NotRegistered`, `AlreadyVerified`
+**Errors:** `AlreadyInitialized`, `NotInitialized`, `NotAuthorized`, `NotRegistered`, `AlreadyVerified`, `NotVerified`
+
+### TypeScript bindings
+
+```bash
+make bindings CONTRACT_ID=$CONTRACT_ID NETWORK=testnet
+```
+
+Generates a typed client package into `bindings/typescript` (git-ignored) from
+the deployed WASM. Clients should call `is_compatible` at startup so a stale
+client fails fast instead of on an unexpected ABI. Full walkthrough:
+[docs/ABI.md](docs/ABI.md#typescript-bindings)
 
 > **`remove` and Soroban auth:** Soroban requires an explicit `caller` address argument so the contract can validate which identity signed the transaction. The caller must equal either the registered Stellar address or the contract admin.
 
