@@ -125,7 +125,10 @@ mod tests {
     fn test_eq_ignore_ascii_case() {
         let env = Env::default();
 
-        assert!(eq_ignore_ascii_case(&s(&env, "Octocat"), &s(&env, "octocat")));
+        assert!(eq_ignore_ascii_case(
+            &s(&env, "Octocat"),
+            &s(&env, "octocat")
+        ));
         assert!(eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "ALICE")));
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "bob")));
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "alice2")));

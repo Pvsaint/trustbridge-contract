@@ -17,7 +17,11 @@ pub struct Version {
 impl Version {
     /// Create a new version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Version { major, minor, patch }
+        Version {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse a version from a tuple (used for storage).
