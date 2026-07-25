@@ -1183,7 +1183,51 @@ mod test {
     }
 
     #[test]
-    fn test_register_after_empty_export() {
+    fn test_verify_after_address_update_targets_new_address_wave_49() {
+        let env = Env::default();
+        let (_admin, old_user, new_user, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), old_user.clone())
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), new_user.clone())
+                .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let after_update =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert_eq!(after_update.stellar_address, new_user);
+            assert!(!after_update.verified);
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).verified, 0);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let after_verify =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert_eq!(after_verify.stellar_address, new_user);
+            assert!(after_verify.verified);
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).verified, 1);
+        });
+    }
+
+    #[test]
+    fn test_cold_start_register_exposes_dashboard_state_wave_50() {
         let env = Env::default();
         let (_admin, user, _other, contract_id) = setup(&env);
 

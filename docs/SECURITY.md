@@ -46,6 +46,10 @@ The admin address is **immutable** after `initialize`. Recommendations:
 - Registering a username requires the Stellar address owner to sign
 - Re-registration with a new address resets verification status
 - There is no on-chain proof of GitHub ownership at registration time — verification is a separate admin step
+- Wave #49 locks the address-update invariant: after a verified username is
+  re-registered to a different Stellar address, the record becomes unverified,
+  the verified count decreases, and any later `verify()` applies to the new
+  address only.
 
 ---
 
