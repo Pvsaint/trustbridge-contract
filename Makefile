@@ -84,3 +84,38 @@ invoke-stats: ## Read registry statistics (read-only)
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		-- get_stats
+
+# --- Security audit prep bundle (Contract Wave #37) --------------------
+#
+# audit-prep bundles the artifacts an external auditor needs without
+# touching mainnet: a benchmarked WASM build, a testnet deploy, a smoke
+# invoke, and a full registry export, timestamped for the audit record.
+
+AUDIT_OUT ?= audit
+
+.PHONY: audit-prep audit-bench audit-export audit-verify
+
+audit-bench: build ## Benchmark build size/time for the audit record
+	@mkdir -p $(AUDIT_OUT)
+	@echo "# Audit build benchmark — $$(date -u +%Y-%m-%dT%H:%M:%SZ)" > $(AUDIT_OUT)/bench.txt
+	@ls -la $(WASM_V1) >> $(AUDIT_OUT)/bench.txt 2>/dev/null || true
+	@cat $(AUDIT_OUT)/bench.txt
+
+audit-export: ## Export the full registry for auditor review (CONTRACT_ID required)
+	@mkdir -p $(AUDIT_OUT)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_all_registered > $(AUDIT_OUT)/registry-export.json
+
+audit-verify: ## Re-invoke get_stats as a post-deploy sanity check for the audit trail
+	@mkdir -p $(AUDIT_OUT)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_stats | tee $(AUDIT_OUT)/stats-snapshot.json
+
+audit-prep: audit-bench deploy-testnet audit-verify audit-export ## Full audit prep bundle: benchmark, deploy, invoke, export
+	@echo "Audit prep bundle written to $(AUDIT_OUT)/"
