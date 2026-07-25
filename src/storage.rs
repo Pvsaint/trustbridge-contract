@@ -13,6 +13,31 @@ pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
 
+// ─── TTL policy (Wave #7) ────────────────────────────────────────────────────
+//
+// Soroban persistent entries expire and are archived unless their TTL is
+// extended. `get_record` and `set_record` already call `extend_ttl` with the two
+// constants below, but neither was ever defined — so the TTL policy this
+// contract claims to have had no actual values behind it.
+//
+// Stellar closes a ledger roughly every 5 seconds, so ~17,280 ledgers is a day.
+
+/// Ledgers per day at the ~5s close time, used to express the policy in days.
+pub const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Only extend when fewer than this many ledgers remain (~30 days).
+///
+/// `extend_ttl` is a no-op when the remaining TTL already exceeds the
+/// threshold, so this is what keeps a hot record from paying the extension
+/// cost on every single read.
+pub const TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
+
+/// Extend to this many ledgers from the current one (~90 days).
+///
+/// Comfortably inside the network's maximum persistent TTL, so an extension is
+/// never rejected for overshooting the cap.
+pub const TTL_BUMP: u32 = LEDGERS_PER_DAY * 90;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 #[repr(u32)]
@@ -91,6 +116,25 @@ pub fn set_record(env: &Env, github_username: &String, record: &ContributorRecor
     let key = (REG_KEY, github_username.clone());
     env.storage().persistent().set(&key, record);
     env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+/// Extends a single record's TTL without deserialising it (Wave #7).
+///
+/// `get_record` also extends as a side effect of reading, but it pays to decode
+/// the `ContributorRecord` first. A keeper bumping thousands of entries does not
+/// want the value, only the extension — this skips that cost.
+///
+/// Returns whether the entry existed. A missing entry is not an error: the
+/// keeper's list is built off-chain and can lag behind removals.
+pub fn extend_record_ttl(env: &Env, github_username: &String) -> bool {
+    let key = (REG_KEY, github_username.clone());
+    if !env.storage().persistent().has(&key) {
+        return false;
+    }
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    true
 }
 
 pub fn remove_record(env: &Env, github_username: &String) {

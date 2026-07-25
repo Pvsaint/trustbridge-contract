@@ -51,6 +51,7 @@ enum Role {
 | 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
+| 12 | `InvalidBatchSize` | Batch is empty or exceeds `max_batch_size` |
 
 ---
 
@@ -113,6 +114,55 @@ removable.
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
   -- register --github-username octocat --stellar-address G...
 ```
+
+---
+
+### `extend_registry_ttl(usernames: Vec<String>) -> Result<u32, ContractError>`
+
+Extend the storage TTL of registry records so they are not archived. Returns the
+number of entries actually extended.
+
+| | |
+|---|---|
+| **Auth** | None — permissionless |
+| **Mutates** | Yes (TTL only) |
+| **Errors** | `NotInitialized`, `InvalidBatchSize` |
+
+Soroban persistent entries expire unless their TTL is extended. Reads and writes
+extend as a side effect, but a record nobody touches for ~30 days is archived and
+becomes unreadable until restored — so a registry with a long tail of inactive
+contributors silently loses its cold entries. This is the keeper operation that
+prevents that: an off-chain job walks the index and calls it periodically for
+entries approaching expiry.
+
+**Permissionless by design.** Extending a TTL only ever preserves data — there is
+no state an attacker could corrupt by calling it — and gating it behind admin
+auth would mean the registry decays whenever the admin key is unavailable. The
+caller pays the fee, which is its own rate limit.
+
+Usernames that are not registered are skipped rather than erroring: the keeper's
+list is built off-chain and can lag behind removals. Compare the return value
+against the batch length to detect drift.
+
+**TTL policy** (`src/storage.rs`):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `TTL_THRESHOLD` | ~30 days | Only extend when fewer than this many ledgers remain |
+| `TTL_BUMP` | ~90 days | Extend to this many ledgers from the current one |
+
+`extend_ttl` is a no-op when the remaining TTL already exceeds the threshold, so
+a hot record does not pay the extension cost on every read.
+
+```bash
+make invoke-extend-ttl CONTRACT_ID=$ID USERNAMES='["octocat","alice"]'
+```
+
+**Benchmark:** `make bench-ttl` writes per-entry CPU and memory cost across a
+size sweep to `bench-ttl-results.txt`. The benchmark asserts cost stays linear in
+batch size — a keeper's per-entry cost determines how many entries it can refresh
+per transaction, so super-linear growth is an operational failure, not just a
+slow test. `make bench-all` runs it alongside the export benchmark.
 
 ---
 

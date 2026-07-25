@@ -29,6 +29,8 @@ use crate::storage::{
     set_version, ADMIN_KEY,
 };
 use crate::storage::{is_admin_caller, is_in_cooldown, is_paused, set_last_action, set_paused};
+use crate::batch::BatchConfig;
+use crate::storage::extend_record_ttl;
 
 #[contract]
 pub struct TrustBridgeContract;
@@ -259,6 +261,48 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Extends the storage TTL of registry records so they are not archived.
+    ///
+    /// Soroban persistent entries expire unless their TTL is extended. Reads and
+    /// writes extend as a side effect, but a record nobody touches for ~30 days
+    /// is archived and becomes unreadable until restored — so a registry with a
+    /// long tail of inactive contributors silently loses its cold entries.
+    ///
+    /// This is the keeper operation that prevents that: an off-chain job walks
+    /// the index and calls this periodically for entries approaching expiry.
+    ///
+    /// Permissionless by design. Extending a TTL only ever preserves data —
+    /// there is no state an attacker could corrupt by calling it, and gating it
+    /// behind admin auth would mean the registry decays whenever the admin key
+    /// is unavailable. The caller pays the fee, which is its own rate limit.
+    ///
+    /// Returns the number of entries actually extended. Usernames that are not
+    /// registered are skipped rather than erroring: the keeper's list is built
+    /// off-chain and can lag behind removals.
+    pub fn extend_registry_ttl(
+        env: Env,
+        usernames: Vec<String>,
+    ) -> Result<u32, ContractError> {
+        require_initialized(&env)?;
+
+        // Bounded for the same reason as batch_verify: an unbounded Vec could
+        // exhaust the ledger's CPU budget and fail after partial work, leaving
+        // the keeper unable to tell which entries were extended.
+        let config = BatchConfig::default();
+        if !config.is_valid_batch_size(usernames.len()) {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        let mut extended: u32 = 0;
+        for username in usernames.iter() {
+            if extend_record_ttl(&env, &username) {
+                extended = extended.saturating_add(1);
+            }
+        }
+
+        Ok(extended)
     }
 
     /// Read-only lookup. Returns `None` if the username is not registered.
@@ -1340,6 +1384,65 @@ mod test {
         (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
     }
 
+    // ─── Benchmark scaffolding (Wave #7) ─────────────────────────────────────
+    //
+    // BENCH_SIZES, bench_username and measure_export were referenced by
+    // test_bench_export_cpu_cost but never defined, so `make bench-export` could
+    // not have run. Defined here because the TTL extender benchmark needs the
+    // same scaffolding, and a benchmark issue is the right place to make the
+    // existing benchmark work.
+
+    /// Registry sizes each benchmark sweeps, smallest first.
+    ///
+    /// The spread has to be wide enough that super-linear growth is
+    /// distinguishable from per-entry overhead, but small enough to stay inside
+    /// the test budget.
+    const BENCH_SIZES: [u32; 4] = [10, 25, 50, 100];
+
+    /// Deterministic distinct username for benchmark entry `i`.
+    ///
+    /// Fixed-width so every key serialises to the same length and entry size
+    /// does not drift across the sweep — otherwise the larger sizes would carry
+    /// slightly wider keys and blur the cost curve.
+    fn bench_username(env: &Env, i: u32) -> String {
+        let mut buf = [b'0'; 8];
+        let mut n = i;
+        let mut idx = buf.len();
+        while idx > 0 {
+            idx -= 1;
+            buf[idx] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        String::from_str(env, core::str::from_utf8(&buf).unwrap())
+    }
+
+    /// Registers `size` contributors, then measures one full registry export.
+    fn measure_export(size: u32) -> (u64, u64) {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for i in 0..size {
+                let _ = TrustBridgeContract::register(
+                    env.clone(),
+                    bench_username(&env, i),
+                    user.clone(),
+                );
+            }
+        });
+
+        // Reset so the measurement covers the export alone, not the setup.
+        env.cost_estimate().budget().reset_default();
+
+        env.as_contract(&contract_id, || {
+            let _ = TrustBridgeContract::get_all_registered(env.clone());
+        });
+
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
     #[test]
     fn test_bench_export_cpu_cost() {
         std::println!("operation,size,cpu_instructions,memory_bytes");
@@ -1375,6 +1478,139 @@ mod test {
             large_cpu <= ceiling,
             "export CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
         );
+    }
+
+    /// Registers `size` contributors, then measures one `extend_registry_ttl`
+    /// call covering all of them.
+    ///
+    /// Only the extension is metered: registration happens before the budget is
+    /// read, so setup cost does not pollute the number.
+    fn measure_ttl_extension(size: u32) -> (u64, u64, u32) {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        let mut names = Vec::new(&env);
+        env.as_contract(&contract_id, || {
+            for i in 0..size {
+                let name = bench_username(&env, i);
+                let _ = TrustBridgeContract::register(
+                    env.clone(),
+                    name.clone(),
+                    user.clone(),
+                );
+                names.push_back(name);
+            }
+        });
+
+        // Reset so the measurement below covers the extension alone.
+        env.cost_estimate().budget().reset_default();
+
+        let extended = env.as_contract(&contract_id, || {
+            TrustBridgeContract::extend_registry_ttl(env.clone(), names.clone())
+                .expect("extend_registry_ttl should succeed for a valid batch")
+        });
+
+        let budget = env.cost_estimate().budget();
+        (
+            budget.cpu_instruction_cost(),
+            budget.memory_bytes_cost(),
+            extended,
+        )
+    }
+
+    /// Benchmark for the TTL extender keeper operation (Wave #7).
+    ///
+    /// Run via `make bench-ttl`. The assertions below are the part that makes
+    /// this a regression gate rather than a report: a keeper's per-entry cost
+    /// determines how many entries it can refresh per transaction, so
+    /// super-linear growth is a real operational failure, not just a slow test.
+    #[test]
+    fn test_bench_ttl_extender_cpu_cost() {
+        std::println!("operation,size,cpu_instructions,memory_bytes,cpu_per_entry");
+
+        let mut previous_cpu = 0u64;
+        let mut baseline: Option<(u32, u64)> = None;
+        let mut largest: Option<(u32, u64)> = None;
+
+        for size in BENCH_SIZES {
+            let (cpu, mem, extended) = measure_ttl_extension(size);
+            std::println!(
+                "extend_registry_ttl,{},{},{},{}",
+                size,
+                cpu,
+                mem,
+                cpu / (size as u64).max(1)
+            );
+
+            assert_eq!(
+                extended, size,
+                "extend_registry_ttl reported {extended} extensions for {size} registered entries"
+            );
+            assert!(cpu > 0, "TTL extension at size {size} was not metered");
+            // Every entry is touched, so cost is monotonic in batch size. A drop
+            // means the extender stopped visiting some of them.
+            assert!(
+                cpu >= previous_cpu,
+                "TTL extension CPU cost dropped at size {size}: {cpu} < {previous_cpu}"
+            );
+
+            previous_cpu = cpu;
+            baseline.get_or_insert((size, cpu));
+            largest = Some((size, cpu));
+        }
+
+        let (small_size, small_cpu) = baseline.unwrap();
+        let (large_size, large_cpu) = largest.unwrap();
+
+        // Extension is a flat per-entry operation with no index scan. Same 3x
+        // headroom as the export benchmark: normal per-entry overhead passes,
+        // quadratic growth fails.
+        let ceiling = small_cpu * ((large_size / small_size) as u64) * 3;
+        assert!(
+            large_cpu <= ceiling,
+            "TTL extension CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
+        );
+    }
+
+    #[test]
+    fn test_extend_registry_ttl_skips_unregistered() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            let _ = TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "alice"),
+                user.clone(),
+            );
+
+            let mut names = Vec::new(&env);
+            names.push_back(username(&env, "alice"));
+            // Never registered — the keeper's off-chain list can lag removals.
+            names.push_back(username(&env, "ghost"));
+
+            let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), names)
+                .expect("a batch with unknown usernames should still succeed");
+            assert_eq!(extended, 1, "only the registered entry should be extended");
+        });
+    }
+
+    #[test]
+    fn test_extend_registry_ttl_rejects_bad_batch_size() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let empty = Vec::new(&env);
+            assert_eq!(
+                TrustBridgeContract::extend_registry_ttl(env.clone(), empty),
+                Err(ContractError::InvalidBatchSize),
+                "an empty batch should be rejected rather than silently succeeding"
+            );
+        });
     }
 
     #[test]

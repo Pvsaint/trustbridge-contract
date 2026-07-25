@@ -14,12 +14,14 @@ CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
 BENCH_OUT   ?= bench-results.txt
+TTL_BENCH_OUT ?= bench-ttl-results.txt
+USERNAMES   ?=
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 
-.PHONY: help build build-legacy test fuzz bench bench-export fmt lint check ci clean \
+.PHONY: help build build-legacy test fuzz bench bench-export bench-ttl bench-all fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-        invoke-register invoke-lookup invoke-init invoke-stats install-target
+        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -45,6 +47,19 @@ bench: ## Report CPU/memory cost per contract operation
 bench-export: ## Write export CPU benchmark results to $(BENCH_OUT)
 	cargo test test_bench_export -- --nocapture --test-threads=1 | tee $(BENCH_OUT)
 	@echo "Benchmark results written to $(BENCH_OUT)"
+
+bench-ttl: ## Write TTL extender CPU benchmark results to $(TTL_BENCH_OUT)
+	cargo test test_bench_ttl_extender -- --nocapture --test-threads=1 | tee $(TTL_BENCH_OUT)
+	@echo "TTL extender benchmark results written to $(TTL_BENCH_OUT)"
+
+bench-all: bench-export bench-ttl ## Run every benchmark and write all result files
+
+invoke-extend-ttl: require-contract-id ## Extend TTL for registry entries (USERNAMES as a JSON array, CONTRACT_ID)
+	@if [ -z "$(USERNAMES)" ]; then \
+		echo "USERNAMES is required, e.g. USERNAMES='[\"octocat\",\"alice\"]'"; exit 1; \
+	fi
+	$(STELLAR) contract invoke --id $(CONTRACT_ID) --source $(SOURCE) --network $(NETWORK) --send=yes \
+	  -- extend_registry_ttl --usernames '$(USERNAMES)'
 
 fmt: ## Check formatting
 	cargo fmt --all -- --check

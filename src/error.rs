@@ -14,6 +14,9 @@ pub enum ContractError {
     CooldownActive = 8,
     InvalidVersion = 9,
     InvalidRole = 10,
+    /// A batched operation was called with an empty batch, or one larger than
+    /// `BatchConfig::max_batch_size`. Raised by `extend_registry_ttl`.
+    InvalidBatchSize = 12,
 }
 
 impl ContractError {
