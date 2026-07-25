@@ -122,19 +122,8 @@ Behavior:
   cleared until the admin verifies the updated address. The Wave #49 regression
   test covers re-verification against the new address.
 
-**Username rules** (enforced on-chain, checked before auth):
-
-| Rule | Value |
-|------|-------|
-| Length | 1 to 39 characters |
-| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
-| First and last character | Must be alphanumeric |
-
-Anything else fails with `InvalidUsername` before any signature is verified and
-before any storage write, so a rejected call leaves counters and the export
-index untouched. Underscores are accepted even though GitHub itself disallows
-them, so registrations made before validation existed stay readable and
-removable.
+A rejected call leaves counters and the export index untouched, because
+validation runs before any signature is verified and before any storage write.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
