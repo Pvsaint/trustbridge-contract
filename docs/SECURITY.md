@@ -70,6 +70,27 @@ We aim to acknowledge reports within 72 hours.
 
 ---
 
+## Futurenet Deploy Smoke Workflow
+
+Wave #39: before an audit or a testnet/mainnet promotion, validate a fresh
+deploy against Futurenet to catch threat-model regressions early (e.g. an
+`initialize` gate that silently no-ops, or a lookup that leaks state before
+verification).
+
+1. Deploy to Futurenet: `ADMIN=G... ./scripts/futurenet_smoke_test.sh`
+2. Confirm `get_stats` reports `{total: 0, verified: 0}` on the fresh instance
+   — a nonzero result means the deploy reused stale storage.
+3. Confirm `has_record` returns `false` for an unregistered username — this
+   guards the "no on-chain proof of GitHub ownership" boundary called out
+   above by verifying reads don't fabricate positive results.
+4. Re-run after any change to `initialize`, `register`, or storage key
+   layout, since those are the surfaces the threat model above depends on.
+
+The script is a deploy sanity check, not a substitute for `cargo test`
+(see `src/lib.rs` and `tests/integration.rs` for functional coverage).
+
+---
+
 ## Audit Status
 
 This contract has **not** been formally audited. Use at your own risk on mainnet until an audit is completed.
