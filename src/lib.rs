@@ -914,4 +914,26 @@ mod test {
         });
     }
 
+    // Wave #42: ContractError code mapping stability for register/verify/remove/export.
+    #[test]
+    fn test_contract_error_code_mapping() {
+        assert_eq!(ContractError::AlreadyInitialized.code(), 1);
+        assert_eq!(ContractError::NotInitialized.code(), 2);
+        assert_eq!(ContractError::NotAuthorized.code(), 3);
+        assert_eq!(ContractError::NotRegistered.code(), 4);
+        assert_eq!(ContractError::AlreadyVerified.code(), 5);
+        assert_eq!(ContractError::NotVerified.code(), 6);
+    }
+
+    #[test]
+    fn test_remove_missing_registration_maps_to_not_registered() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let err = TrustBridgeContract::remove(env.clone(), admin.clone(), username(&env, "ghost")).unwrap_err();
+            assert_eq!(err, ContractError::NotRegistered);
+        });
+    }
 }
