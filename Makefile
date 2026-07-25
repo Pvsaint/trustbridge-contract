@@ -14,7 +14,7 @@ CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
 
-.PHONY: help build build-legacy test fmt lint check ci clean deploy-testnet deploy-mainnet \
+.PHONY: help build build-legacy test fuzz fmt lint check ci clean deploy-testnet deploy-mainnet \
         invoke-register invoke-lookup invoke-init invoke-stats install-target
 
 help: ## Show this help
@@ -31,6 +31,9 @@ build-legacy: install-target ## Build with cargo directly (wasm32-unknown-unknow
 
 test: ## Run unit tests
 	cargo test
+
+fuzz: ## Run the invariant property fuzzing suite (deterministic seeds)
+	cargo test fuzz -- --nocapture
 
 fmt: ## Check formatting
 	cargo fmt --all -- --check

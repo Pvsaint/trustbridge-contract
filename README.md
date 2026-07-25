@@ -100,6 +100,7 @@ trustbridge-contract/
 │   ├── ARCHITECTURE.md # Design, storage, auth, events
 │   ├── ABI.md          # Function & event reference
 │   ├── DEPLOYMENT.md   # Testnet/mainnet deployment guide
+│   ├── REGISTRY_INVARIANTS.md # Invariants and the property fuzzing suite
 │   └── CONTRIBUTING.md # How to contribute
 ├── .github/workflows/
 │   └── ci.yml          # fmt, clippy, test, contract build
@@ -137,9 +138,15 @@ cd trustbridge-contract
 
 ```bash
 make test          # Run unit tests
+make fuzz          # Run the invariant property fuzzing suite
 make build         # Build optimized WASM (via stellar contract build)
 make check         # fmt + clippy + test + build
 ```
+
+The fuzzing suite drives randomized `register` / `verify` / `revoke_verification` /
+`remove` sequences against an independent model of the registry and asserts the
+invariants in [docs/REGISTRY_INVARIANTS.md](docs/REGISTRY_INVARIANTS.md) after every
+step. Seeds are fixed constants, so failures replay deterministically.
 
 > **Note on WASM targets:** `soroban-sdk` 26.x requires the `wasm32v1-none` target. Building with `wasm32-unknown-unknown` on Rust 1.82+ is unsupported by the Soroban environment. The release profile uses `opt-level = "z"` and `lto = true` as specified in `Cargo.toml`.
 

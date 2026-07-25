@@ -892,4 +892,267 @@ mod test {
         });
     }
 
+    // === Invariant property fuzzing
+
+    /// Deterministic xorshift64 generator.
+    ///
+    /// Seeds are fixed constants rather than clock-derived so a CI failure can
+    /// be replayed locally by rerunning the same test.
+    struct Prng(u64);
+
+    impl Prng {
+        fn new(seed: u64) -> Self {
+            // A zero state would make xorshift emit only zeroes.
+            Prng(seed | 1)
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x >> 32) as u32
+        }
+
+        fn below(&mut self, bound: u32) -> u32 {
+            self.next_u32() % bound
+        }
+    }
+
+    const FUZZ_USERNAMES: [&str; 6] = ["alice", "bob", "carol", "dave", "erin", "frank"];
+    const FUZZ_SEEDS: [u64; 4] = [0x5eed_0001, 0x0bad_c0de, 0xdead_beef, 0x1234_5678];
+    const FUZZ_MISSING: [&str; 3] = ["ghost", "nobody", "absent"];
+
+    #[derive(Clone, Copy)]
+    struct ShadowRecord {
+        address: u32,
+        verified: bool,
+    }
+
+    /// Model of the registry maintained outside contract storage. Invariants
+    /// are asserted against this model so a bug in the contract's own counters
+    /// cannot mask itself.
+    struct Shadow {
+        records: [Option<ShadowRecord>; FUZZ_USERNAMES.len()],
+    }
+
+    impl Shadow {
+        fn new() -> Self {
+            Shadow {
+                records: [None; FUZZ_USERNAMES.len()],
+            }
+        }
+
+        fn total(&self) -> u32 {
+            self.records.iter().filter(|r| r.is_some()).count() as u32
+        }
+
+        fn verified(&self) -> u32 {
+            self.records
+                .iter()
+                .filter(|r| matches!(r, Some(rec) if rec.verified))
+                .count() as u32
+        }
+    }
+
+    fn assert_registry_invariants(
+        env: &Env,
+        contract_id: &Address,
+        users: &[Address],
+        shadow: &Shadow,
+    ) {
+        env.as_contract(contract_id, || {
+            let stats = TrustBridgeContract::get_stats(env.clone());
+
+            // I1: total tracks the number of live records.
+            assert_eq!(stats.total, shadow.total());
+            // I2: verified tracks the number of live records flagged verified.
+            assert_eq!(stats.verified, shadow.verified());
+            // I3: the standalone getter never diverges from the stats view.
+            assert_eq!(
+                TrustBridgeContract::get_verified_count(env.clone()),
+                stats.verified
+            );
+            // I4: verified is a subset of total, so it can never exceed it.
+            assert!(stats.verified <= stats.total);
+
+            // I5: the export index holds exactly one entry per live record.
+            let exported = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+            assert_eq!(exported.len(), stats.total);
+
+            // I6: every username resolves to the address last registered for it.
+            for (slot, name) in FUZZ_USERNAMES.iter().enumerate() {
+                let key = username(env, name);
+                match shadow.records[slot] {
+                    Some(expected) => {
+                        let record =
+                            TrustBridgeContract::get_address(env.clone(), key).unwrap();
+                        assert_eq!(record.stellar_address, users[expected.address as usize]);
+                        assert_eq!(record.verified, expected.verified);
+                    }
+                    None => {
+                        assert!(TrustBridgeContract::get_address(env.clone(), key).is_none());
+                    }
+                }
+            }
+        });
+    }
+
+    fn run_fuzz_session(seed: u64, steps: u32) {
+        let env = Env::default();
+        let (admin, user_a, user_b, contract_id) = setup(&env);
+        let users = [user_a, user_b, Address::generate(&env)];
+
+        env.mock_all_auths();
+
+        let mut prng = Prng::new(seed);
+        let mut shadow = Shadow::new();
+
+        for _ in 0..steps {
+            let slot = prng.below(FUZZ_USERNAMES.len() as u32) as usize;
+            let name = username(&env, FUZZ_USERNAMES[slot]);
+
+            match prng.below(4) {
+                0 => {
+                    let addr = prng.below(users.len() as u32);
+                    let target = users[addr as usize].clone();
+                    env.as_contract(&contract_id, || {
+                        TrustBridgeContract::register(env.clone(), name.clone(), target).unwrap();
+                    });
+
+                    // Verification survives only a re-registration of the same address.
+                    let carried = matches!(
+                        shadow.records[slot],
+                        Some(prev) if prev.address == addr && prev.verified
+                    );
+                    shadow.records[slot] = Some(ShadowRecord {
+                        address: addr,
+                        verified: carried,
+                    });
+                }
+                1 => {
+                    let result = env.as_contract(&contract_id, || {
+                        TrustBridgeContract::verify(env.clone(), name.clone())
+                    });
+
+                    match shadow.records[slot] {
+                        Some(rec) if !rec.verified => {
+                            result.unwrap();
+                            shadow.records[slot] = Some(ShadowRecord {
+                                verified: true,
+                                ..rec
+                            });
+                        }
+                        Some(_) => assert_eq!(result, Err(ContractError::AlreadyVerified)),
+                        None => assert_eq!(result, Err(ContractError::NotRegistered)),
+                    }
+                }
+                2 => {
+                    let result = env.as_contract(&contract_id, || {
+                        TrustBridgeContract::revoke_verification(env.clone(), name.clone())
+                    });
+
+                    match shadow.records[slot] {
+                        Some(rec) if rec.verified => {
+                            result.unwrap();
+                            shadow.records[slot] = Some(ShadowRecord {
+                                verified: false,
+                                ..rec
+                            });
+                        }
+                        Some(_) => assert_eq!(result, Err(ContractError::NotVerified)),
+                        None => assert_eq!(result, Err(ContractError::NotRegistered)),
+                    }
+                }
+                _ => {
+                    let result = env.as_contract(&contract_id, || {
+                        TrustBridgeContract::remove(env.clone(), admin.clone(), name.clone())
+                    });
+
+                    match shadow.records[slot] {
+                        Some(_) => {
+                            result.unwrap();
+                            shadow.records[slot] = None;
+                        }
+                        None => assert_eq!(result, Err(ContractError::NotRegistered)),
+                    }
+                }
+            }
+
+            assert_registry_invariants(&env, &contract_id, &users, &shadow);
+        }
+    }
+
+    #[test]
+    fn test_fuzz_invariants_hold_across_random_operation_sequences() {
+        for seed in FUZZ_SEEDS {
+            run_fuzz_session(seed, 64);
+        }
+    }
+
+    #[test]
+    fn test_fuzz_invariants_hold_at_contributor_scale() {
+        // Longer run over the same slot pool: exercises repeated churn on every
+        // username rather than a single pass.
+        run_fuzz_session(0xc0ff_ee42, 256);
+    }
+
+    #[test]
+    fn test_fuzz_failure_paths_leave_invariants_intact() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user.clone())
+                .unwrap();
+        });
+
+        let mut prng = Prng::new(0xfa11_ed01);
+
+        for _ in 0..48 {
+            let missing = FUZZ_MISSING[prng.below(FUZZ_MISSING.len() as u32) as usize];
+            let name = username(&env, missing);
+            let op = prng.below(3);
+
+            env.as_contract(&contract_id, || {
+                let result = match op {
+                    0 => TrustBridgeContract::verify(env.clone(), name.clone()),
+                    1 => TrustBridgeContract::revoke_verification(env.clone(), name.clone()),
+                    _ => TrustBridgeContract::remove(env.clone(), admin.clone(), name.clone()),
+                };
+
+                assert_eq!(result, Err(ContractError::NotRegistered));
+
+                // Rejected operations must not move any counter.
+                let stats = TrustBridgeContract::get_stats(env.clone());
+                assert_eq!(stats.total, 1);
+                assert_eq!(stats.verified, 0);
+            });
+        }
+    }
+
+    #[test]
+    fn test_fuzz_counters_never_underflow_on_empty_registry() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        let mut prng = Prng::new(0x0000_dead);
+
+        for _ in 0..32 {
+            let name = username(&env, FUZZ_USERNAMES[prng.below(FUZZ_USERNAMES.len() as u32) as usize]);
+
+            env.as_contract(&contract_id, || {
+                let result = TrustBridgeContract::remove(env.clone(), admin.clone(), name.clone());
+                assert_eq!(result, Err(ContractError::NotRegistered));
+
+                let stats = TrustBridgeContract::get_stats(env.clone());
+                assert_eq!(stats.total, 0);
+                assert_eq!(stats.verified, 0);
+            });
+        }
+    }
 }
