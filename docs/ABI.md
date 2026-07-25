@@ -27,6 +27,17 @@ struct Stats {
 }
 ```
 
+### ExportPage
+
+```rust
+struct ExportPage {
+    records: Vec<(String, ContributorRecord)>,
+    next_cursor: Option<u32>,
+    total: u32,
+    has_more: bool,
+}
+```
+
 ### ContractError (u32 discriminant)
 
 | Code | Name | Description |
@@ -37,6 +48,9 @@ struct Stats {
 | 4 | `NotRegistered` | Username not in registry |
 | 5 | `AlreadyVerified` | Username already verified |
 | 6 | `NotVerified` | Cannot revoke verification because the username is not verified |
+| 7 | `Paused` | Contract is currently paused by admin |
+| 8 | `InvalidLimit` | Requested page limit is invalid or exceeds max limit |
+| 9 | `CooldownActive` | Cooldown period active for caller |
 
 ---
 
@@ -202,6 +216,73 @@ Returns `{ total, verified }` registration counts.
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet \
   -- get_stats
+```
+
+---
+
+### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Exports paginated contributor records starting at `cursor` up to `limit` items. Admin-only.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor 0 --limit 20
+```
+
+---
+
+### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Public paginated read endpoint for indexers and dashboards. Capped limits and pause check enforced.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `Paused` |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_public_paginated --cursor 0 --limit 20
+```
+
+---
+
+### `set_paused(paused: bool) -> Result<(), ContractError>`
+
+Toggles emergency pause state. Admin-only.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- set_paused --paused true
+```
+
+---
+
+### `is_paused() -> bool`
+
+Returns `true` if contract state is currently paused.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- is_paused
 ```
 
 ---

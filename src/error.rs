@@ -10,6 +10,9 @@ pub enum ContractError {
     NotRegistered = 4,
     AlreadyVerified = 5,
     NotVerified = 6,
+    Paused = 7,
+    InvalidLimit = 8,
+    CooldownActive = 9,
 }
 
 impl ContractError {
