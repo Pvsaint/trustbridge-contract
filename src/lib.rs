@@ -982,4 +982,21 @@ mod test {
             assert_eq!(err, ContractError::NotRegistered);
         });
     }
+
+    #[test]
+    fn test_contract_error_from_code_is_inverse_of_code() {
+        let variants = [
+            ContractError::AlreadyInitialized,
+            ContractError::NotInitialized,
+            ContractError::NotAuthorized,
+            ContractError::NotRegistered,
+            ContractError::AlreadyVerified,
+            ContractError::NotVerified,
+        ];
+        for variant in variants {
+            assert_eq!(ContractError::from_code(variant.code()), Some(variant));
+        }
+        assert_eq!(ContractError::from_code(0), None);
+        assert_eq!(ContractError::from_code(7), None);
+    }
 }
