@@ -987,4 +987,63 @@ mod test {
             assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
         });
     }
+
+    // --- Wave #44: verified reregister invariants (attestation/expiry-adjacent behavior) ---
+
+    #[test]
+    fn test_reregister_same_address_preserves_verified_flag() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+
+            // Re-registering with the SAME stellar address should not clear verification.
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(record.verified);
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+        });
+    }
+
+    #[test]
+    fn test_reregister_new_address_clears_verified_flag_and_decrements_count() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone()).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(!record.verified);
+            assert_eq!(record.stellar_address, other);
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+        });
+    }
+
+    #[test]
+    fn test_reregister_after_new_address_requires_reverification() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone()).unwrap();
+
+            // Verification must be re-established explicitly; it is not implicit.
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(record.verified);
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+        });
+    }
+
 }
