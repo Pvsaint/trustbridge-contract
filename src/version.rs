@@ -1,7 +1,7 @@
-/// Contract versioning and compatibility tracking.
-///
-/// This module provides version management utilities for tracking contract
-/// upgrades, migrations, and maintaining backward compatibility.
+//! Contract versioning and compatibility tracking.
+//!
+//! This module provides version management utilities for tracking contract
+//! upgrades, migrations, and maintaining backward compatibility.
 
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -14,7 +14,11 @@ pub struct Version {
 impl Version {
     /// Create a new version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Version { major, minor, patch }
+        Version {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse a version from a tuple (used for storage).
@@ -109,7 +113,7 @@ impl CompatibilityInfo {
         CompatibilityInfo {
             current_version: current,
             target_version: target,
-            migration_required: target.needs_migration(current),
+            migration_required: current.needs_migration(target),
             breaking_changes,
             data_migration_required,
         }
@@ -119,6 +123,12 @@ impl CompatibilityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrustBridgeContract;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+
+    fn username(env: &Env, name: &str) -> String {
+        String::from_str(env, name)
+    }
 
     #[test]
     fn test_version_comparison() {
@@ -144,7 +154,7 @@ mod tests {
     #[test]
     fn test_version_bumps() {
         let v1_2_3 = Version::new(1, 2, 3);
-        
+
         assert_eq!(v1_2_3.bump_patch(), Version::new(1, 2, 4));
         assert_eq!(v1_2_3.bump_minor(), Version::new(1, 3, 0));
         assert_eq!(v1_2_3.bump_major(), Version::new(2, 0, 0));
@@ -153,6 +163,44 @@ mod tests {
     #[test]
     fn test_version_display() {
         let v = Version::new(1, 2, 3);
-        assert_eq!(format!("{}", v), "1.2.3");
+        assert_eq!(std::format!("{}", v), "1.2.3");
+    }
+
+    #[test]
+    fn test_compatibility_info_marks_forward_minor_migration_required() {
+        let current = Version::new(1, 0, 0);
+        let target = Version::new(1, 1, 0);
+
+        let info = CompatibilityInfo::for_upgrade(current, target);
+
+        assert_eq!(info.current_version, current);
+        assert_eq!(info.target_version, target);
+        assert!(info.migration_required);
+        assert!(!info.breaking_changes);
+        assert!(info.data_migration_required);
+    }
+
+    #[test]
+    fn test_stable_missing_lookup_across_version_checks_wave_48() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+
+            let before = TrustBridgeContract::get_stats(env.clone());
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none()
+            );
+
+            let info = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 1, 0));
+            assert!(info.migration_required);
+
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none()
+            );
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()), before);
+        });
     }
 }

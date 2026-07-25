@@ -11,3 +11,11 @@ The dashboard can combine contract state with Horizon checks to show payout read
 5. Re-check before payout export.
 
 Contract verification proves the registry entry was approved; Horizon readiness proves the address can receive the selected asset.
+
+## Cold-start registration regression
+
+Wave #50 covers the dashboard's cold-start assumption: immediately after
+`initialize`, `get_stats()` should report `{ total: 0, verified: 0 }` and admin
+`get_all_registered()` should be empty. After the first `register()` call, the
+same sync path must expose `{ total: 1, verified: 0 }` and return the new
+GitHub username → Stellar address pair from `get_all_registered()`.

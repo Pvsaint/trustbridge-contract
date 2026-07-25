@@ -74,6 +74,12 @@ Behavior:
 
 - New username → increment `count`, append to `idx`
 - Existing username → update record; reset `verified` if address changed
+- Cold-start registration from an initialized empty registry must expose the
+  new record through both `get_address` and admin `get_all_registered`; this is
+  covered by the Wave #50 regression test.
+- If a verified username is updated to a new Stellar address, verification is
+  cleared until the admin verifies the updated address. The Wave #49 regression
+  test covers re-verification against the new address.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
@@ -118,6 +124,11 @@ stellar contract invoke --id $ID --source registrant --network testnet --send=ye
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- remove --caller G... --github-username octocat
 ```
+
+Stats invariant: partial removal decrements `total` only for the removed record
+and decrements `verified` only when that removed record was verified. Removing
+an unverified record while another verified record remains must leave
+`verified` unchanged; this is covered by the Wave #46 regression test.
 
 ---
 
