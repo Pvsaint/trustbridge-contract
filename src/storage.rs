@@ -7,6 +7,20 @@ pub const ADMIN_KEY: Symbol = symbol_short!("admin");
 pub const COUNT_KEY: Symbol = symbol_short!("count");
 pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
 pub const INDEX_KEY: Symbol = symbol_short!("idx");
+pub const PAUSED_KEY: Symbol = symbol_short!("pause");
+pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
+pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
+pub const VER_KEY: Symbol = symbol_short!("ver");
+pub const ROLE_KEY: Symbol = symbol_short!("role");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+#[repr(u32)]
+pub enum Role {
+    Admin = 1,
+    Upgrader = 2,
+    Verifier = 3,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
@@ -112,4 +126,75 @@ pub fn get_stats(env: &Env) -> Stats {
 
 pub fn has_record(env: &Env, github_username: &String) -> bool {
     get_record(env, github_username).is_some()
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn get_cooldown(env: &Env) -> u64 {
+    env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
+}
+
+pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&COOLDOWN_KEY, &cooldown_seconds);
+}
+
+pub fn get_last_upgrade(env: &Env) -> u64 {
+    env.storage().instance().get(&LAST_UPG_KEY).unwrap_or(0)
+}
+
+pub fn set_last_upgrade(env: &Env, timestamp: u64) {
+    env.storage().instance().set(&LAST_UPG_KEY, &timestamp);
+}
+
+pub fn get_version(env: &Env) -> (u32, u32, u32) {
+    env.storage().instance().get(&VER_KEY).unwrap_or((1, 0, 0))
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
+}
+
+pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
+    env.storage().persistent().get(&(ROLE_KEY, address.clone()))
+}
+
+pub fn set_role(env: &Env, address: &Address, role: &Role) {
+    env.storage()
+        .persistent()
+        .set(&(ROLE_KEY, address.clone()), role);
+}
+
+pub fn remove_role(env: &Env, address: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&(ROLE_KEY, address.clone()));
+}
+
+pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
+    if let Ok(admin) = get_admin(env) {
+        if *address == admin {
+            return true;
+        }
+    }
+    match get_role(env, address) {
+        Some(Role::Admin) => true,
+        Some(r) => r == expected_role,
+        None => false,
+    }
 }
