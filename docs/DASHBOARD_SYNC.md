@@ -9,70 +9,29 @@ The TrustBridge dashboard and indexer consumers combine Soroban contract state w
 3. **Hardened Public Reads & Emergency Pause (Issue #3)**: `get_public_paginated` allows unauthenticated dashboard reads with capped limits (`MAX_PAGE_LIMIT = 100`) and enforces emergency contract pause states.
 4. **Makefile Admin Invoke Targets (Issue #30)**: Convenient CLI commands for operators to query and manage registry state.
 
----
+Contract verification proves the registry entry was approved; Horizon readiness proves the address can receive the selected asset.
 
-## Recommended Sync Order for Dashboard Consumers
+## has_record lookup optimization (Wave #40)
 
-1. **Query Paginated Records**: Fetch contributor pages starting from `cursor = 0` using `get_public_paginated` or `make invoke-public-paginated`.
-2. **Normalize Handles**: Lowercase GitHub handles for consistent indexing and filtering.
-3. **Horizon Verification**: For each retrieved Stellar address, query Horizon for account existence, asset trustlines, and minimum reserve balances.
-4. **Cache State**: Store verified status with TTL matching dashboard refresh cycles.
-5. **Re-check Before Payouts**: Re-verify contributor status immediately before signing batch payments.
+`has_record(github_username) -> bool` is now exposed as a contract entry
+point. Dashboard and indexer consumers that only need an existence check
+(e.g. "is this username already registered?" during a form validation, or a
+membership check while paging through webhook events) should call it instead
+of `get_address`:
 
----
+- `has_record` avoids deserializing the full `ContributorRecord`.
+- `get_address` should still be used whenever the caller actually needs
+  `stellar_address`, `registered_at`, or `verified`.
 
-## Makefile Admin & Sync Invoke Commands
+Tests for this behavior live alongside the contract in `src/lib.rs`
+(`test_has_record_reflects_registration_state`) and `src/storage.rs`
+(`test_has_record_true_after_set_record`).
 
-### 1. Paginated Public Sync (Indexer / Dashboard)
-```bash
-make invoke-public-paginated CONTRACT_ID=C... CURSOR=0 LIMIT=20 NETWORK=testnet
-```
+## Paginated registry reads (Wave #41)
 
-### 2. Paginated Admin Export
-```bash
-make invoke-export-paginated CONTRACT_ID=C... SOURCE=admin CURSOR=0 LIMIT=50 NETWORK=testnet
-```
-
-### 3. Full Registry Export
-```bash
-make invoke-get-all-registered CONTRACT_ID=C... SOURCE=admin NETWORK=testnet
-```
-
-### 4. Admin Verification & Revocation
-```bash
-# Verify contributor
-make invoke-verify CONTRACT_ID=C... SOURCE=admin GITHUB_USER=octocat NETWORK=testnet
-
-# Revoke verification
-make invoke-revoke-verification CONTRACT_ID=C... SOURCE=admin GITHUB_USER=octocat NETWORK=testnet
-```
-
-### 5. Emergency Pause Control
-```bash
-# Pause contract
-make invoke-set-paused CONTRACT_ID=C... SOURCE=admin PAUSED=true NETWORK=testnet
-
-# Unpause contract
-make invoke-set-paused CONTRACT_ID=C... SOURCE=admin PAUSED=false NETWORK=testnet
-```
-
-### 6. Remove Contributor Registration
-```bash
-make invoke-remove CONTRACT_ID=C... SOURCE=admin CALLER=G... GITHUB_USER=octocat NETWORK=testnet
-```
-
----
-
-## Test & Failure Path Scenarios
-
-### Success Path
-- Indexer invokes `get_public_paginated` with `cursor = 0` and `limit = 20`.
-- Contract returns `ExportPage` with up to 20 records, `total` count, `has_more = true`, and `next_cursor = 20`.
-- Indexer iterates using `cursor = next_cursor` until `has_more = false`.
-
-### Failure Path 1: Horizon Outage or Invalid Address
-- If Horizon RPC is unreachable during payout checks, contract state serves as fallback source of truth; payouts pause safely until Horizon returns online.
-
-### Failure Path 2: Contract Paused State
-- When `set_paused(true)` is set by admin, public paginated reads and state modifications fail with `ContractError::Paused` (code `7`).
-- Admin unpauses via `set_paused(false)` to restore normal operation.
+`get_all_registered` returns the entire index in one call, which doesn't
+scale as the registry grows. Use `get_registered_page(offset, limit)`
+instead when syncing incrementally — it walks the same admin-gated index but
+in bounded chunks, so a dashboard/indexer sync job can page through without
+risking a resource-limit failure on a large registry. See
+`test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.

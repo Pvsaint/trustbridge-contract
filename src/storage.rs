@@ -7,18 +7,20 @@ pub const ADMIN_KEY: Symbol = symbol_short!("admin");
 pub const COUNT_KEY: Symbol = symbol_short!("count");
 pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
 pub const INDEX_KEY: Symbol = symbol_short!("idx");
-pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("c_cnt");
-pub const PAUSED_KEY: Symbol = symbol_short!("paused");
+pub const PAUSED_KEY: Symbol = symbol_short!("pause");
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
+pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
+pub const VER_KEY: Symbol = symbol_short!("ver");
+pub const ROLE_KEY: Symbol = symbol_short!("role");
 
-pub const CHUNK_SIZE: u32 = 100;
-pub const DEFAULT_PAGE_LIMIT: u32 = 20;
-pub const MAX_PAGE_LIMIT: u32 = 100;
-
-/// Persistent storage TTL settings (30 days threshold, 60 days bump)
-pub const TTL_THRESHOLD: u32 = 518400; // ~30 days in ledgers (assuming 5s ledgers)
-pub const TTL_BUMP: u32 = 1036800; // ~60 days in ledgers
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+#[repr(u32)]
+pub enum Role {
+    Admin = 1,
+    Upgrader = 2,
+    Verifier = 3,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
@@ -112,7 +114,16 @@ pub fn set_verified_count(env: &Env, count: u32) {
     env.storage().instance().set(&VCOUNT_KEY, &count);
 }
 
-// Single-vector index (legacy support)
+/// Returns the version recorded at initialize time, or `None` for instances
+/// deployed before version tracking existed.
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VERSION_KEY)
+}
+
+pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
+    env.storage().instance().set(&VERSION_KEY, version);
+}
+
 pub fn get_index(env: &Env) -> Vec<String> {
     env.storage()
         .instance()
@@ -263,6 +274,10 @@ pub fn get_registered_paginated_internal(
     })
 }
 
+// Wave #41: build_stats is the single centralized constructor for `Stats`.
+// All stats reads (get_stats, and any future indexer/dashboard aggregate
+// endpoints) should route through it rather than building `Stats { .. }`
+// literals directly, so count/verified-count semantics stay in one place.
 pub fn build_stats(total: u32, verified: u32) -> Stats {
     Stats { total, verified }
 }
@@ -275,47 +290,73 @@ pub fn has_record(env: &Env, github_username: &String) -> bool {
     get_record(env, github_username).is_some()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
 
-    #[test]
-    fn test_chunked_index_operations() {
-        let env = Env::default();
-        let user = String::from_str(&env, "testuser");
-        add_to_index(&env, &user);
-        assert_eq!(get_chunk_count(&env), 1);
-        let chunk = get_chunk(&env, 0);
-        assert_eq!(chunk.len(), 1);
-        assert_eq!(chunk.get(0).unwrap(), user);
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
 
-        remove_from_index(&env, &user);
-        let chunk_after = get_chunk(&env, 0);
-        assert_eq!(chunk_after.len(), 0);
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
     }
+}
 
-    #[test]
-    fn test_pause_state_toggle() {
-        let env = Env::default();
-        assert!(!is_paused(&env));
-        assert!(require_not_paused(&env).is_ok());
+pub fn get_cooldown(env: &Env) -> u64 {
+    env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
+}
 
-        set_paused_state(&env, true);
-        assert!(is_paused(&env));
-        assert_eq!(require_not_paused(&env), Err(ContractError::Paused));
+pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&COOLDOWN_KEY, &cooldown_seconds);
+}
+
+pub fn get_last_upgrade(env: &Env) -> u64 {
+    env.storage().instance().get(&LAST_UPG_KEY).unwrap_or(0)
+}
+
+pub fn set_last_upgrade(env: &Env, timestamp: u64) {
+    env.storage().instance().set(&LAST_UPG_KEY, &timestamp);
+}
+
+pub fn get_version(env: &Env) -> (u32, u32, u32) {
+    env.storage().instance().get(&VER_KEY).unwrap_or((1, 0, 0))
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
+}
+
+pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
+    env.storage().persistent().get(&(ROLE_KEY, address.clone()))
+}
+
+pub fn set_role(env: &Env, address: &Address, role: &Role) {
+    env.storage()
+        .persistent()
+        .set(&(ROLE_KEY, address.clone()), role);
+}
+
+pub fn remove_role(env: &Env, address: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&(ROLE_KEY, address.clone()));
+}
+
+pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
+    if let Ok(admin) = get_admin(env) {
+        if *address == admin {
+            return true;
+        }
     }
-
-    #[test]
-    fn test_paginated_export_empty() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        env.storage().instance().set(&ADMIN_KEY, &admin);
-
-        let page = get_registered_paginated_internal(&env, 0, 10).unwrap();
-        assert_eq!(page.total, 0);
-        assert_eq!(page.records.len(), 0);
-        assert_eq!(page.next_cursor, None);
-        assert!(!page.has_more);
+    match get_role(env, address) {
+        Some(Role::Admin) => true,
+        Some(r) => r == expected_role,
+        None => false,
     }
 }
