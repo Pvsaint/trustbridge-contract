@@ -14,6 +14,12 @@ pub enum ContractError {
     CooldownActive = 8,
     InvalidVersion = 9,
     InvalidRole = 10,
+    /// `upgrade` was called with a hash that does not match the live
+    /// attestation. See `attest_upgrade`.
+    UnattestedWasm = 13,
+    /// The upgrade attestation has lapsed, or `attest_upgrade` was called with
+    /// an `expires_at` that is not in the future.
+    AttestationExpired = 14,
 }
 
 impl ContractError {
