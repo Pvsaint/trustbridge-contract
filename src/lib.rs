@@ -250,6 +250,14 @@ impl TrustBridgeContract {
         }
     }
 
+    /// Cheap existence check for dashboard/indexer consumers.
+    ///
+    /// Avoids deserializing the full `ContributorRecord` when callers only
+    /// need to know whether a `github_username` is registered (Wave #40).
+    pub fn has_record(env: Env, github_username: String) -> bool {
+        has_record(&env, &github_username)
+    }
+
     /// Removes a registration. Callable by the registrant or the admin.
     ///
     /// `caller` must sign the transaction and must equal either the contract
@@ -285,6 +293,31 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Returns a page of registered (github_username, stellar_address) pairs
+    /// starting at `offset`, up to `limit` entries. Admin-only, like
+    /// `get_all_registered`, but avoids materializing the whole registry in
+    /// one call for large indexes (Wave #41).
+    pub fn get_registered_page(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<(String, Address)>, ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let page = get_index_page(&env, offset, limit);
+        let mut result = Vec::new(&env);
+        for i in 0..page.len() {
+            let username = page.get(i).unwrap();
+            if let Some(record) = get_record(&env, &username) {
+                result.push_back((username, record.stellar_address));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Returns the full registry. Admin-only.

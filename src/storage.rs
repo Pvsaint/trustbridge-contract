@@ -116,6 +116,10 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
     set_index(env, &next);
 }
 
+// Wave #41: build_stats is the single centralized constructor for `Stats`.
+// All stats reads (get_stats, and any future indexer/dashboard aggregate
+// endpoints) should route through it rather than building `Stats { .. }`
+// literals directly, so count/verified-count semantics stay in one place.
 pub fn build_stats(total: u32, verified: u32) -> Stats {
     Stats { total, verified }
 }
