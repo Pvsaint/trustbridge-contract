@@ -24,9 +24,15 @@ fi
 
 NETWORK=futurenet INIT=true ADMIN="$ADMIN" "$ROOT/scripts/deploy.sh"
 
-CONTRACT_ID="$(python3 -c "import json;print(json.load(open('deployments/futurenet.json'))['contract_id'])" 2>/dev/null || true)"
+DEPLOY_FILE="deployments/futurenet.json"
+if [[ ! -f "$DEPLOY_FILE" ]]; then
+  echo "ERROR: $DEPLOY_FILE not found; deploy.sh should have written it."
+  exit 1
+fi
+
+CONTRACT_ID="$(grep -o '"contract_id": *"[^"]*"' "$DEPLOY_FILE" | sed -E 's/.*: *"([^"]*)"/\1/')"
 if [[ -z "$CONTRACT_ID" ]]; then
-  echo "ERROR: could not read deployed contract id from deployments/futurenet.json"
+  echo "ERROR: could not read contract_id from $DEPLOY_FILE"
   exit 1
 fi
 
