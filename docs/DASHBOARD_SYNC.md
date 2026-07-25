@@ -12,10 +12,27 @@ The dashboard can combine contract state with Horizon checks to show payout read
 
 Contract verification proves the registry entry was approved; Horizon readiness proves the address can receive the selected asset.
 
-## Cold-start registration regression
+## has_record lookup optimization (Wave #40)
 
-Wave #50 covers the dashboard's cold-start assumption: immediately after
-`initialize`, `get_stats()` should report `{ total: 0, verified: 0 }` and admin
-`get_all_registered()` should be empty. After the first `register()` call, the
-same sync path must expose `{ total: 1, verified: 0 }` and return the new
-GitHub username → Stellar address pair from `get_all_registered()`.
+`has_record(github_username) -> bool` is now exposed as a contract entry
+point. Dashboard and indexer consumers that only need an existence check
+(e.g. "is this username already registered?" during a form validation, or a
+membership check while paging through webhook events) should call it instead
+of `get_address`:
+
+- `has_record` avoids deserializing the full `ContributorRecord`.
+- `get_address` should still be used whenever the caller actually needs
+  `stellar_address`, `registered_at`, or `verified`.
+
+Tests for this behavior live alongside the contract in `src/lib.rs`
+(`test_has_record_reflects_registration_state`) and `src/storage.rs`
+(`test_has_record_true_after_set_record`).
+
+## Paginated registry reads (Wave #41)
+
+`get_all_registered` returns the entire index in one call, which doesn't
+scale as the registry grows. Use `get_registered_page(offset, limit)`
+instead when syncing incrementally — it walks the same admin-gated index but
+in bounded chunks, so a dashboard/indexer sync job can page through without
+risking a resource-limit failure on a large registry. See
+`test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.

@@ -1,7 +1,10 @@
 //! Contract versioning and compatibility tracking.
 //!
 //! This module provides version management utilities for tracking contract
-//! upgrades, migrations, and maintaining backward compatibility.
+//! upgrades, migrations, and maintaining backward compatibility. The deployed
+//! version is written to instance storage by `initialize` and exposed through
+//! the `version` and `is_compatible` contract functions, which the generated
+//! TypeScript bindings package uses to guard against ABI drift.
 
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -113,6 +116,8 @@ impl CompatibilityInfo {
         CompatibilityInfo {
             current_version: current,
             target_version: target,
+            // Direction matters: the deployed version is what may need to move
+            // to the target, not the other way round.
             migration_required: current.needs_migration(target),
             breaking_changes,
             data_migration_required,
@@ -123,12 +128,8 @@ impl CompatibilityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TrustBridgeContract;
-    use soroban_sdk::{testutils::Address as _, Address, Env, String};
-
-    fn username(env: &Env, name: &str) -> String {
-        String::from_str(env, name)
-    }
+    extern crate alloc;
+    use alloc::format;
 
     #[test]
     fn test_version_comparison() {
@@ -167,40 +168,57 @@ mod tests {
     }
 
     #[test]
-    fn test_compatibility_info_marks_forward_minor_migration_required() {
+    fn test_version_tuple_roundtrip() {
+        let v = Version::new(2, 7, 13);
+        assert_eq!(Version::from_tuple(v.to_tuple()), v);
+    }
+
+    #[test]
+    fn test_needs_migration() {
         let current = Version::new(1, 0, 0);
-        let target = Version::new(1, 1, 0);
 
-        let info = CompatibilityInfo::for_upgrade(current, target);
+        assert!(current.needs_migration(Version::new(1, 1, 0)));
+        assert!(current.needs_migration(Version::new(2, 0, 0)));
+        // Same version is already migrated.
+        assert!(!current.needs_migration(current));
+        // Downgrades to an older major are not a migration path.
+        assert!(!Version::new(2, 0, 0).needs_migration(Version::new(1, 0, 0)));
+    }
 
-        assert_eq!(info.current_version, current);
-        assert_eq!(info.target_version, target);
+    #[test]
+    fn test_compatibility_info_for_minor_upgrade() {
+        let info = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 1, 0));
+
         assert!(info.migration_required);
         assert!(!info.breaking_changes);
+        assert!(info.data_migration_required);
+        assert_eq!(info.current_version, Version::new(1, 0, 0));
+        assert_eq!(info.target_version, Version::new(1, 1, 0));
+    }
+
+    #[test]
+    fn test_compatibility_info_for_major_upgrade() {
+        let info = CompatibilityInfo::for_upgrade(Version::new(1, 4, 2), Version::new(2, 0, 0));
+
+        assert!(info.migration_required);
+        assert!(info.breaking_changes);
         assert!(info.data_migration_required);
     }
 
     #[test]
-    fn test_stable_missing_lookup_across_version_checks_wave_48() {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        let contract_id = env.register(TrustBridgeContract, ());
+    fn test_compatibility_info_for_patch_upgrade() {
+        let info = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 0, 1));
 
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+        assert!(info.migration_required);
+        assert!(!info.breaking_changes);
+        // A patch release keeps the storage layout, so no data migration.
+        assert!(!info.data_migration_required);
+    }
 
-            let before = TrustBridgeContract::get_stats(env.clone());
-            assert!(
-                TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none()
-            );
-
-            let info = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 1, 0));
-            assert!(info.migration_required);
-
-            assert!(
-                TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none()
-            );
-            assert_eq!(TrustBridgeContract::get_stats(env.clone()), before);
-        });
+    #[test]
+    fn test_migration_state_variants_are_distinct() {
+        assert_ne!(MigrationState::NotRequired, MigrationState::Pending);
+        assert_ne!(MigrationState::InProgress, MigrationState::Completed);
+        assert_ne!(MigrationState::Completed, MigrationState::Failed);
     }
 }

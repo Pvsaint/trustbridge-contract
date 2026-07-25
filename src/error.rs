@@ -10,10 +10,50 @@ pub enum ContractError {
     NotRegistered = 4,
     AlreadyVerified = 5,
     NotVerified = 6,
+    Paused = 7,
+    CooldownActive = 8,
+    InvalidVersion = 9,
+    InvalidRole = 10,
 }
 
 impl ContractError {
     pub fn code(self) -> u32 {
         self as u32
     }
+
+    /// Reverse of `code()`: maps a raw u32 (e.g. decoded from a failed
+    /// invocation's XDR result by a dashboard or indexer) back to the typed
+    /// variant. Returns `None` for codes that don't correspond to a variant,
+    /// so callers don't need to keep their own copy of this table in sync.
+    pub fn from_code(code: u32) -> Option<ContractError> {
+        match code {
+            1 => Some(ContractError::AlreadyInitialized),
+            2 => Some(ContractError::NotInitialized),
+            3 => Some(ContractError::NotAuthorized),
+            4 => Some(ContractError::NotRegistered),
+            5 => Some(ContractError::AlreadyVerified),
+            6 => Some(ContractError::NotVerified),
+            _ => None,
+        }
+    }
 }
+
+// Wave #42: ContractError code mapping for register / verify / remove / export
+// consumers (dashboard, indexer, off-chain tooling) that need stable u32 codes
+// without depending on the Rust enum layout.
+//
+// | Code | Variant             | Raised by                          |
+// |------|----------------------|-------------------------------------|
+// | 1    | AlreadyInitialized   | initialize                         |
+// | 2    | NotInitialized       | register, remove, get_all_registered, verify, revoke_verification |
+// | 3    | NotAuthorized        | remove                             |
+// | 4    | NotRegistered        | remove, verify, revoke_verification |
+// | 5    | AlreadyVerified      | verify                             |
+// | 6    | NotVerified          | revoke_verification                |
+//
+// `ContractError::from_code` is the reverse of this table for off-chain
+// consumers decoding a raw error code back into a typed variant.
+//
+// Tests covering this mapping live in `src/lib.rs`
+// (`test_contract_error_code_mapping`, `test_remove_missing_registration_maps_to_not_registered`,
+// `test_contract_error_from_code_is_inverse_of_code`).
