@@ -892,4 +892,107 @@ mod test {
         });
     }
 
+    // Explicit auth invariants (Contract Wave #36).
+    //
+    // These document, per-entrypoint, exactly whose `require_auth` is
+    // expected to gate the call so a future change to auth wiring shows
+    // up as a targeted test failure instead of a silent regression.
+
+    #[test]
+    #[should_panic]
+    fn auth_register_requires_stellar_address_auth() {
+        // register() requires the auth of the stellar_address being bound,
+        // not any arbitrary caller.
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn auth_remove_requires_caller_auth() {
+        // remove() requires require_auth() on the passed-in `caller`, even
+        // when that caller is the correct registrant/admin.
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn auth_get_all_registered_requires_admin_auth() {
+        // get_all_registered() is admin-gated even though it is a read.
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn auth_verify_requires_admin_auth() {
+        // verify() must be gated on the admin, never the registrant.
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn auth_revoke_verification_requires_admin_auth() {
+        // revoke_verification() mirrors verify()'s admin-only gate.
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(env.clone(), username(&env, "octocat")).unwrap();
+        });
+    }
+
+    #[test]
+    fn auth_get_address_and_get_stats_are_public_reads() {
+        // get_address() and get_stats() intentionally require no auth at
+        // all, unlike get_all_registered(). Asserting that here keeps the
+        // asymmetry deliberate rather than accidental.
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_some());
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+        });
+    }
+
 }
