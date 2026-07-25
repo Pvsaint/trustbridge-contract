@@ -27,6 +27,16 @@ struct Stats {
 }
 ```
 
+### Role (u32 discriminant)
+
+```rust
+enum Role {
+    Admin = 1,
+    Upgrader = 2,
+    Verifier = 3,
+}
+```
+
 ### ContractError (u32 discriminant)
 
 | Code | Name | Description |
@@ -37,6 +47,10 @@ struct Stats {
 | 4 | `NotRegistered` | Username not in registry |
 | 5 | `AlreadyVerified` | Username already verified |
 | 6 | `NotVerified` | Cannot revoke verification because the username is not verified |
+| 7 | `Paused` | Contract is paused for maintenance or emergency |
+| 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
+| 9 | `InvalidVersion` | Target version is not higher than current version |
+| 10 | `InvalidRole` | Invalid or unauthorized role assignment |
 
 ---
 
@@ -206,6 +220,72 @@ stellar contract invoke --id $ID --source deployer --network testnet \
 
 ---
 
+### `pause() -> Result<(), ContractError>`
+
+Pauses all state-mutating contract operations. Admin-only.
+
+---
+
+### `unpause() -> Result<(), ContractError>`
+
+Unpauses state-mutating contract operations. Admin-only.
+
+---
+
+### `is_paused() -> bool`
+
+Returns true if contract mutations are currently paused.
+
+---
+
+### `set_role(target: Address, role: Role) -> Result<(), ContractError>`
+
+Assigns an administrative or operational role (`Admin`, `Upgrader`, `Verifier`). Admin-only.
+
+---
+
+### `remove_role(target: Address) -> Result<(), ContractError>`
+
+Revokes a role from an address. Admin-only.
+
+---
+
+### `get_role(address: Address) -> Option<Role>`
+
+Queries assigned role for an address.
+
+---
+
+### `set_cooldown(cooldown_seconds: u64) -> Result<(), ContractError>`
+
+Configures the WASM upgrade timelock cooldown period in seconds. Admin-only.
+
+---
+
+### `get_cooldown() -> u64`
+
+Returns the current WASM upgrade timelock cooldown period in seconds.
+
+---
+
+### `get_version() -> (u32, u32, u32)`
+
+Returns contract version tuple `(major, minor, patch)`.
+
+---
+
+### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ContractError>`
+
+Upgrades the executable WASM bytecode of the contract. Subject to admin authentication and upgrade timelock cooldown.
+
+---
+
+### `migrate(new_version: (u32, u32, u32)) -> Result<(), ContractError>`
+
+Updates the contract schema version following a WASM upgrade. Target version must be strictly higher than current version. Admin-only.
+
+---
+
 ## Events
 
 All events are defined with `#[contractevent]` and include a topic field for filtering.
@@ -229,6 +309,34 @@ data:   { stellar_address, timestamp }
 ```
 topics: ["VerifiedEvent", github_username]
 data:   { stellar_address, timestamp }
+```
+
+### VerificationRevokedEvent
+
+```
+topics: ["VerificationRevokedEvent", github_username]
+data:   { stellar_address, timestamp }
+```
+
+### UpgradedEvent
+
+```
+topics: ["UpgradedEvent", new_wasm_hash]
+data:   { version, timestamp }
+```
+
+### PausedEvent / UnpausedEvent
+
+```
+topics: ["PausedEvent" / "UnpausedEvent", admin]
+data:   { timestamp }
+```
+
+### RoleGrantedEvent / RoleRevokedEvent
+
+```
+topics: ["RoleGrantedEvent" / "RoleRevokedEvent", address]
+data:   { role, admin, timestamp }
 ```
 
 ---

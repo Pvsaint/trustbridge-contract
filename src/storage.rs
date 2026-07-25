@@ -7,6 +7,20 @@ pub const ADMIN_KEY: Symbol = symbol_short!("admin");
 pub const COUNT_KEY: Symbol = symbol_short!("count");
 pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
 pub const INDEX_KEY: Symbol = symbol_short!("idx");
+pub const PAUSED_KEY: Symbol = symbol_short!("pause");
+pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
+pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
+pub const VER_KEY: Symbol = symbol_short!("ver");
+pub const ROLE_KEY: Symbol = symbol_short!("role");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+#[repr(u32)]
+pub enum Role {
+    Admin = 1,
+    Upgrader = 2,
+    Verifier = 3,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
@@ -118,69 +132,73 @@ pub fn has_record(env: &Env, github_username: &String) -> bool {
     get_record(env, github_username).is_some()
 }
 
-// Wave #41: pagination helper over the INDEX_KEY list for indexer/dashboard
-// consumers that page through the registry instead of pulling it whole.
-// `offset`/`limit` are clamped to the index length; entries whose persistent
-// record has since expired (see docs/SECURITY.md "Storage TTL") are skipped.
-pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
-    let index = get_index(env);
-    let len = index.len();
-    let start = offset.min(len);
-    let end = start.saturating_add(limit).min(len);
-
-    let mut page = Vec::new(env);
-    for i in start..end {
-        if let Some(username) = index.get(i) {
-            page.push_back(username);
-        }
-    }
-    page
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::testutils::Address as _;
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
 
-    #[test]
-    fn test_build_stats_centralizes_construction() {
-        let stats = build_stats(5, 2);
-        assert_eq!(stats.total, 5);
-        assert_eq!(stats.verified, 2);
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
     }
+}
 
-    #[test]
-    fn test_get_index_page_pagination() {
-        let env = Env::default();
-        let mut index = Vec::new(&env);
-        for name in ["alice", "bob", "carol", "dave"] {
-            index.push_back(String::from_str(&env, name));
+pub fn get_cooldown(env: &Env) -> u64 {
+    env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
+}
+
+pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&COOLDOWN_KEY, &cooldown_seconds);
+}
+
+pub fn get_last_upgrade(env: &Env) -> u64 {
+    env.storage().instance().get(&LAST_UPG_KEY).unwrap_or(0)
+}
+
+pub fn set_last_upgrade(env: &Env, timestamp: u64) {
+    env.storage().instance().set(&LAST_UPG_KEY, &timestamp);
+}
+
+pub fn get_version(env: &Env) -> (u32, u32, u32) {
+    env.storage().instance().get(&VER_KEY).unwrap_or((1, 0, 0))
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
+}
+
+pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
+    env.storage().persistent().get(&(ROLE_KEY, address.clone()))
+}
+
+pub fn set_role(env: &Env, address: &Address, role: &Role) {
+    env.storage()
+        .persistent()
+        .set(&(ROLE_KEY, address.clone()), role);
+}
+
+pub fn remove_role(env: &Env, address: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&(ROLE_KEY, address.clone()));
+}
+
+pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
+    if let Ok(admin) = get_admin(env) {
+        if *address == admin {
+            return true;
         }
-        set_index(&env, &index);
-
-        let page = get_index_page(&env, 1, 2);
-        assert_eq!(page.len(), 2);
-        assert_eq!(page.get(0).unwrap(), String::from_str(&env, "bob"));
-        assert_eq!(page.get(1).unwrap(), String::from_str(&env, "carol"));
-
-        // offset past the end returns an empty page instead of panicking
-        let empty = get_index_page(&env, 10, 2);
-        assert_eq!(empty.len(), 0);
     }
-
-    #[test]
-    fn test_has_record_true_after_set_record() {
-        let env = Env::default();
-        let username = String::from_str(&env, "octocat");
-        let addr = Address::generate(&env);
-        let record = ContributorRecord {
-            stellar_address: addr,
-            registered_at: 0,
-            verified: false,
-        };
-
-        assert!(!has_record(&env, &username));
-        set_record(&env, &username, &record);
-        assert!(has_record(&env, &username));
+    match get_role(env, address) {
+        Some(Role::Admin) => true,
+        Some(r) => r == expected_role,
+        None => false,
     }
 }

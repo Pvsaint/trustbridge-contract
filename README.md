@@ -43,13 +43,19 @@ This contract provides that mapping **on-chain**:
 
 ## Features
 
-- `initialize` — one-time admin setup
+- `initialize` — one-time admin setup and initial role assignment
 - `register` — map GitHub username → Stellar address (requires address auth)
 - `get_address` — read-only lookup
 - `remove` — self-service or admin removal
 - `verify` — admin marks contributor as GitHub-verified
+- `revoke_verification` — admin revokes verified status
 - `get_all_registered` — admin-only full export for dashboard sync
 - `get_stats` — total and verified registration counts
+- `pause` / `unpause` / `is_paused` — emergency circuit breaker to pause mutating contract state
+- `set_role` / `remove_role` / `get_role` — Role-Based Access Control (`Admin`, `Upgrader`, `Verifier`)
+- `set_cooldown` / `get_cooldown` — WASM upgrade timelock cooldown period configuration
+- `upgrade` — admin/upgrader executable WASM code replacement
+- `migrate` / `get_version` — schema version migration harness and tracking
 
 See the full [ABI reference](docs/ABI.md) for argument types, return values, and events.
 
@@ -81,6 +87,11 @@ See the full [ABI reference](docs/ABI.md) for argument types, return values, and
 | `Symbol("count")` | Total registration count (`u32`) |
 | `Symbol("vcount")` | Verified registration count (`u32`) |
 | `Symbol("idx")` | Username index for admin export |
+| `Symbol("pause")` | Emergency pause boolean state (`bool`) |
+| `Symbol("cdown")` | WASM upgrade cooldown duration in seconds (`u64`) |
+| `Symbol("lastupg")` | Timestamp of last WASM upgrade (`u64`) |
+| `Symbol("ver")` | Contract schema version tuple (`(u32, u32, u32)`) |
+| `Symbol("role")` + `Address` | Assigned user role enum (`Role`) |
 
 ---
 
@@ -90,10 +101,11 @@ See the full [ABI reference](docs/ABI.md) for argument types, return values, and
 trustbridge-contract/
 ├── src/
 │   ├── lib.rs          # Contract implementation + unit tests
-│   ├── storage.rs      # Storage keys, types, helpers
-│   ├── events.rs       # RegisteredEvent, RemovedEvent, VerifiedEvent
-│   └── error.rs        # ContractError enum
-├── tests/              # (reserved for integration tests)
+│   ├── storage.rs      # Storage keys, Role enum, accessors
+│   ├── events.rs       # Contract event definitions (Registered, Verified, Upgraded, Paused, Role, etc.)
+│   └── error.rs        # ContractError enum (includes Paused, CooldownActive, etc.)
+├── tests/
+│   └── integration.rs  # End-to-end integration test suite & event tracking
 ├── scripts/
 │   └── deploy.sh       # Network-aware deploy + initialize script
 ├── docs/
