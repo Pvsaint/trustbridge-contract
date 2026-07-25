@@ -15,6 +15,7 @@ use crate::storage::{
     get_verified_count as storage_get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
     set_record, set_verified_count, ADMIN_KEY,
 };
+use crate::storage::{is_admin_caller, is_in_cooldown, is_paused, set_last_action, set_paused};
 
 #[contract]
 pub struct TrustBridgeContract;
@@ -203,6 +204,51 @@ impl TrustBridgeContract {
     /// Returns aggregate registration statistics.
     pub fn get_stats(env: Env) -> Stats {
         read_stats(&env)
+    }
+
+    // --- Reference event indexer hardening: admin/pause/roles/cooldown (Wave #33) ---
+
+    /// Pauses the contract. Admin-only.
+    pub fn pause(env: Env, caller: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+        if !is_admin_caller(&env, &caller) {
+            return Err(ContractError::NotAuthorized);
+        }
+        set_paused(&env, true);
+        Ok(())
+    }
+
+    /// Unpauses the contract. Admin-only.
+    pub fn unpause(env: Env, caller: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+        if !is_admin_caller(&env, &caller) {
+            return Err(ContractError::NotAuthorized);
+        }
+        set_paused(&env, false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_contract_paused(env: Env) -> bool {
+        is_paused(&env)
+    }
+
+    /// Returns true if `caller` holds the admin role.
+    pub fn has_admin_role(env: Env, caller: Address) -> bool {
+        is_admin_caller(&env, &caller)
+    }
+
+    /// Records that `github_username` performed a registry-mutating action now,
+    /// for cooldown enforcement by callers.
+    pub fn record_action(env: Env, github_username: String) {
+        set_last_action(&env, &github_username, env.ledger().timestamp());
+    }
+
+    /// Returns true if `github_username` is still within the cooldown window.
+    pub fn is_registration_in_cooldown(env: Env, github_username: String) -> bool {
+        is_in_cooldown(&env, &github_username)
     }
 }
 
@@ -892,4 +938,55 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_admin_can_pause_and_unpause() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert!(!TrustBridgeContract::is_contract_paused(env.clone()));
+            TrustBridgeContract::pause(env.clone(), admin.clone()).unwrap();
+            assert!(TrustBridgeContract::is_contract_paused(env.clone()));
+            TrustBridgeContract::unpause(env.clone(), admin.clone()).unwrap();
+            assert!(!TrustBridgeContract::is_contract_paused(env.clone()));
+        });
+    }
+
+    #[test]
+    fn test_non_admin_cannot_pause() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::pause(env.clone(), user.clone());
+            assert_eq!(result, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    #[test]
+    fn test_has_admin_role() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::has_admin_role(env.clone(), admin.clone()));
+            assert!(!TrustBridgeContract::has_admin_role(env.clone(), user.clone()));
+        });
+    }
+
+    #[test]
+    fn test_cooldown_tracks_recorded_actions() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let name = username(&env, "octocat");
+            assert!(!TrustBridgeContract::is_registration_in_cooldown(env.clone(), name.clone()));
+            TrustBridgeContract::record_action(env.clone(), name.clone());
+            assert!(TrustBridgeContract::is_registration_in_cooldown(env.clone(), name.clone()));
+        });
+    }
 }

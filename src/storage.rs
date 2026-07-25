@@ -149,6 +149,49 @@ pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
     page
 }
 
+// --- Reference event indexer hardening: pause + role + cooldown (Wave #33) ---
+
+pub const PAUSED_KEY: Symbol = symbol_short!("paused");
+pub const LASTACT_KEY: Symbol = symbol_short!("lastact");
+/// Minimum seconds a github_username must wait between registry-mutating actions.
+pub const COOLDOWN_SECONDS: u64 = 60;
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+pub fn get_last_action(env: &Env, github_username: &String) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&(LASTACT_KEY, github_username.clone()))
+}
+
+pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
+    env.storage()
+        .persistent()
+        .set(&(LASTACT_KEY, github_username.clone()), &timestamp);
+}
+
+/// Returns true if `github_username` acted within the cooldown window.
+pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
+    match get_last_action(env, github_username) {
+        Some(last) => env.ledger().timestamp() < last.saturating_add(COOLDOWN_SECONDS),
+        None => false,
+    }
+}
+
+/// Returns true if `caller` is the configured contract admin (role check).
+pub fn is_admin_caller(env: &Env, caller: &Address) -> bool {
+    match get_admin(env) {
+        Ok(admin) => admin == *caller,
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
