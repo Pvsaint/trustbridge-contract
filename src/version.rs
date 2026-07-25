@@ -6,6 +6,14 @@
 //! the `version` and `is_compatible` contract functions, which the generated
 //! TypeScript bindings package uses to guard against ABI drift.
 
+/// The build-time contract version constant. Reported by `version()` on
+/// instances deployed before on-chain version tracking was added.
+pub const CONTRACT_VERSION: Version = Version {
+    major: 1,
+    minor: 0,
+    patch: 0,
+};
+
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Version {
@@ -164,7 +172,8 @@ mod tests {
     #[test]
     fn test_version_display() {
         let v = Version::new(1, 2, 3);
-        assert_eq!(std::format!("{}", v), "1.2.3");
+        let s = alloc::format!("{}", v);
+        assert_eq!(s, "1.2.3");
     }
 
     #[test]
