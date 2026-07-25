@@ -14,6 +14,9 @@ pub enum ContractError {
     CooldownActive = 8,
     InvalidVersion = 9,
     InvalidRole = 10,
+    /// `register` was called with a username that is not a well-formed GitHub
+    /// handle. See `utils::is_valid_github_username` for the exact rules.
+    InvalidUsername = 11,
 }
 
 impl ContractError {
@@ -33,6 +36,11 @@ impl ContractError {
             4 => Some(ContractError::NotRegistered),
             5 => Some(ContractError::AlreadyVerified),
             6 => Some(ContractError::NotVerified),
+            7 => Some(ContractError::Paused),
+            8 => Some(ContractError::CooldownActive),
+            9 => Some(ContractError::InvalidVersion),
+            10 => Some(ContractError::InvalidRole),
+            11 => Some(ContractError::InvalidUsername),
             _ => None,
         }
     }
@@ -50,6 +58,11 @@ impl ContractError {
 // | 4    | NotRegistered        | remove, verify, revoke_verification |
 // | 5    | AlreadyVerified      | verify                             |
 // | 6    | NotVerified          | revoke_verification                |
+// | 7    | Paused               | register, remove, verify, revoke_verification |
+// | 8    | CooldownActive       | upgrade                            |
+// | 9    | InvalidVersion       | upgrade                            |
+// | 10   | InvalidRole          | grant_role                         |
+// | 11   | InvalidUsername      | register                           |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

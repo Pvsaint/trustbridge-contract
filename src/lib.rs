@@ -29,6 +29,7 @@ use crate::storage::{
     set_version, ADMIN_KEY,
 };
 use crate::storage::{is_admin_caller, is_in_cooldown, is_paused, set_last_action, set_paused};
+use crate::utils::is_valid_github_username;
 
 #[contract]
 pub struct TrustBridgeContract;
@@ -217,8 +218,13 @@ impl TrustBridgeContract {
     /// Registers or updates a GitHub username → Stellar address mapping.
     ///
     /// The caller must authenticate as `stellar_address`. The username must be
-    /// 1 to 39 characters of alphanumerics, hyphens, and underscores, starting
-    /// and ending alphanumeric, or the call fails with `InvalidUsername`.
+    /// 1 to 39 characters of ASCII alphanumerics, hyphens, and underscores,
+    /// starting and ending alphanumeric, with no consecutive hyphens, or the
+    /// call fails with `InvalidUsername` (code 11).
+    ///
+    /// Validation applies to `register` only. Lookups and `remove` accept any
+    /// username so that records written before validation existed stay
+    /// readable and removable.
     pub fn register(
         env: Env,
         github_username: String,
@@ -226,6 +232,15 @@ impl TrustBridgeContract {
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
+
+        // Validate before require_auth: a malformed username is rejected at the
+        // cheapest possible point, and the caller is not charged for an auth
+        // check on an invocation that can never succeed. This is also what
+        // stops an unbounded key from ever reaching persistent storage.
+        if !is_valid_github_username(&github_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
         stellar_address.require_auth();
 
         let timestamp = env.ledger().timestamp();

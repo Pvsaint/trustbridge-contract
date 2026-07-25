@@ -51,6 +51,7 @@ enum Role {
 | 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
+| 11 | `InvalidUsername` | `github_username` is not a well-formed GitHub handle |
 
 ---
 
@@ -83,6 +84,32 @@ Register or update a GitHub username mapping.
 | **Mutates** | Yes |
 | **Errors** | `NotInitialized`, `InvalidUsername` |
 | **Events** | `RegisteredEvent` |
+
+**Username validation:**
+
+`github_username` must be a well-formed GitHub handle or the call fails with
+`InvalidUsername` (code 11) before any authentication or storage write:
+
+| Rule | Accepted | Rejected |
+|---|---|---|
+| Length 1–39 characters | `a`, `octocat` | `""`, 40+ characters |
+| ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space`, `café` |
+| First and last character alphanumeric | `alice`, `7` | `-invalid`, `invalid-`, `_leading`, `trailing_` |
+| No consecutive hyphens | `foo-bar-baz` | `foo--bar` |
+
+Two deliberate choices:
+
+- **Underscores are accepted** even though GitHub itself rejects them. Records
+  written before validation existed must stay removable, and `remove` looks a
+  username up by exact key — a name that cannot be expressed could never be
+  cleaned up.
+- **Validation applies to `register` only.** Lookups, `remove`, `verify` and
+  `revoke_verification` accept any username, for the same reason.
+
+Checks run *before* `require_auth`, so a malformed username is rejected at the
+cheapest point and the caller is not charged for an auth check on an invocation
+that can never succeed. It is also what stops an unbounded key from reaching
+persistent storage.
 
 Behavior:
 
