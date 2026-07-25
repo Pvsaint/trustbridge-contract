@@ -87,6 +87,16 @@ pub fn set_verified_count(env: &Env, count: u32) {
     env.storage().instance().set(&VCOUNT_KEY, &count);
 }
 
+/// Returns the version recorded at initialize time, or `None` for instances
+/// deployed before version tracking existed.
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VERSION_KEY)
+}
+
+pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
+    env.storage().instance().set(&VERSION_KEY, version);
+}
+
 pub fn get_index(env: &Env) -> Vec<String> {
     env.storage()
         .instance()

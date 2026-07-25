@@ -198,8 +198,27 @@ impl TrustBridgeContract {
         Ok(())
     }
 
+    /// Returns the deployed contract version as `(major, minor, patch)`.
+    ///
+    /// Instances initialized before versioning was added carry no stored
+    /// version and report the build constant instead.
+    pub fn version(env: Env) -> (u32, u32, u32) {
+        get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
+    }
+
+    /// Reports whether the deployed contract satisfies a client's minimum
+    /// required version. Bindings consumers call this before invoking, so a
+    /// stale client fails fast instead of on an unexpected ABI.
+    pub fn is_compatible(env: Env, major: u32, minor: u32, patch: u32) -> bool {
+        Version::from_tuple(Self::version(env))
+            .is_compatible_with(Version::new(major, minor, patch))
+    }
+
     /// Registers or updates a GitHub username → Stellar address mapping.
-    /// The caller must authenticate as `stellar_address`.
+    ///
+    /// The caller must authenticate as `stellar_address`. The username must be
+    /// 1 to 39 characters of alphanumerics, hyphens, and underscores, starting
+    /// and ending alphanumeric, or the call fails with `InvalidUsername`.
     pub fn register(
         env: Env,
         github_username: String,
@@ -965,6 +984,8 @@ mod test {
         assert_eq!(ContractError::NotAuthorized.code(), 3);
         assert_eq!(ContractError::NotRegistered.code(), 4);
         assert_eq!(ContractError::AlreadyVerified.code(), 5);
+        assert_eq!(ContractError::NotVerified.code(), 6);
+        assert_eq!(ContractError::InvalidUsername.code(), 7);
     }
 
     #[test]
@@ -1229,6 +1250,46 @@ mod test {
                 TrustBridgeContract::register(env.clone(), username(&env, "alice"), user.clone());
             assert!(reg_res_2.is_ok());
         });
+
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    #[test]
+    fn test_bench_export_cpu_cost() {
+        std::println!("operation,size,cpu_instructions,memory_bytes");
+
+        let mut previous_cpu = 0u64;
+        let mut baseline: Option<(u32, u64)> = None;
+        let mut largest: Option<(u32, u64)> = None;
+
+        for size in BENCH_SIZES {
+            let (cpu, mem) = measure_export(size);
+            std::println!("get_all_registered,{},{},{}", size, cpu, mem);
+
+            assert!(cpu > 0, "export at size {size} was not metered");
+            // Cost is monotonic in registry size; a drop means the export
+            // stopped visiting every record.
+            assert!(
+                cpu >= previous_cpu,
+                "export CPU cost dropped at size {size}: {cpu} < {previous_cpu}"
+            );
+
+            previous_cpu = cpu;
+            baseline.get_or_insert((size, cpu));
+            largest = Some((size, cpu));
+        }
+
+        let (small_size, small_cpu) = baseline.unwrap();
+        let (large_size, large_cpu) = largest.unwrap();
+
+        // Export is a linear scan. Allow 3x headroom over the size ratio so
+        // normal per-entry overhead passes while quadratic growth fails.
+        let ceiling = small_cpu * ((large_size / small_size) as u64) * 3;
+        assert!(
+            large_cpu <= ceiling,
+            "export CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
+        );
     }
 
     #[test]

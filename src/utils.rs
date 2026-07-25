@@ -1,4 +1,16 @@
-/// Utility functions for TrustBridge contract operations.
+//! Input validation helpers for TrustBridge contract operations.
+//!
+//! Validation runs before authentication and before any storage write, so a
+//! malformed username is rejected at the cheapest possible point. Everything
+//! here works on a fixed stack buffer: the contract is `#![no_std]` and must
+//! not allocate on the validation path.
+
+use soroban_sdk::String;
+
+/// GitHub caps usernames at 39 characters.
+pub const MAX_USERNAME_LEN: u32 = 39;
+
+/// Copies a username into a fixed stack buffer.
 ///
 /// This module provides helper functions for common contract operations,
 /// string manipulation, and validation.
@@ -17,14 +29,19 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
 }
 
 /// Validate that a GitHub username follows basic rules.
-/// GitHub usernames must be 1-39 characters, alphanumeric with hyphens/underscores.
+///
+/// Accepts 1 to 39 characters of alphanumerics, hyphens, and underscores, with
+/// an alphanumeric first and last character. Underscores are not valid on
+/// GitHub itself but are accepted here so registrations made before validation
+/// existed remain readable and removable.
 pub fn is_valid_github_username(s: &String) -> bool {
     let len = s.len() as usize;
 
     // Length check: 1-39 characters
     if len < 1 || len > 39 {
         return false;
-    }
+    };
+    let bytes = &buf[..len];
 
     let mut buf = [0u8; 64];
     s.copy_into_slice(&mut buf[..len]);
@@ -35,8 +52,18 @@ pub fn is_valid_github_username(s: &String) -> bool {
         return false;
     }
 
-    // Last character must be alphanumeric
-    if !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+}
+
+/// Case-insensitive comparison of two usernames.
+///
+/// GitHub usernames are case-insensitive, so this is what an off-chain
+/// verification workflow should use when matching a registration against a
+/// GitHub identity.
+pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
+    if a.len() != b.len() {
         return false;
     }
 
@@ -63,6 +90,20 @@ pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::Env;
+
+    fn s(env: &Env, value: &str) -> String {
+        String::from_str(env, value)
+    }
+
+    #[test]
+    fn test_is_empty() {
+        let env = Env::default();
+
+        assert!(is_empty(&s(&env, "")));
+        assert!(!is_empty(&s(&env, " ")));
+        assert!(!is_empty(&s(&env, "alice")));
+    }
 
     #[test]
     fn test_is_empty_or_whitespace() {
@@ -101,5 +142,11 @@ mod tests {
         assert_eq!(calculate_verification_percentage(100, 100), 100);
         assert_eq!(calculate_verification_percentage(1, 3), 33);
         assert_eq!(calculate_verification_percentage(10, 0), 0);
+    }
+
+    #[test]
+    fn test_percentage_does_not_overflow_at_u32_max() {
+        // The u64 widening is what keeps this from wrapping.
+        assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
     }
 }
