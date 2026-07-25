@@ -1,5 +1,10 @@
 #![no_std]
 
+// Tests and benchmarks need allocation and stdout for reporting results. The
+// contract itself stays no_std.
+#[cfg(test)]
+extern crate std;
+
 mod error;
 mod events;
 mod storage;
@@ -1131,6 +1136,153 @@ mod test {
                 assert_eq!(stats.verified, 0);
             });
         }
+    }
+
+    // === Cost benchmarks
+
+    /// Registry sizes probed by the export benchmark. The 100 case mirrors the
+    /// contributor scale the registry is expected to reach.
+    const BENCH_SIZES: [u32; 4] = [1, 10, 50, 100];
+
+    fn bench_username(env: &Env, i: u32) -> String {
+        String::from_str(env, &std::format!("contributor{:04}", i))
+    }
+
+    /// Populates `size` registrations, then meters a single admin export over
+    /// that registry. Returns `(cpu_instructions, memory_bytes)`.
+    fn measure_export(size: u32) -> (u64, u64) {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            for i in 0..size {
+                TrustBridgeContract::register(env.clone(), bench_username(&env, i), user.clone())
+                    .unwrap();
+            }
+        });
+
+        // Reset after setup so only the export itself is metered. Unlimited
+        // keeps tracking on while removing the ledger ceiling, which a 100-entry
+        // export would otherwise trip during measurement.
+        env.cost_estimate().budget().reset_unlimited();
+
+        env.as_contract(&contract_id, || {
+            let exported = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+            assert_eq!(exported.len(), size);
+        });
+
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    #[test]
+    fn test_bench_export_cpu_cost() {
+        std::println!("operation,size,cpu_instructions,memory_bytes");
+
+        let mut previous_cpu = 0u64;
+        let mut baseline: Option<(u32, u64)> = None;
+        let mut largest: Option<(u32, u64)> = None;
+
+        for size in BENCH_SIZES {
+            let (cpu, mem) = measure_export(size);
+            std::println!("get_all_registered,{},{},{}", size, cpu, mem);
+
+            assert!(cpu > 0, "export at size {size} was not metered");
+            // Cost is monotonic in registry size; a drop means the export
+            // stopped visiting every record.
+            assert!(
+                cpu >= previous_cpu,
+                "export CPU cost dropped at size {size}: {cpu} < {previous_cpu}"
+            );
+
+            previous_cpu = cpu;
+            baseline.get_or_insert((size, cpu));
+            largest = Some((size, cpu));
+        }
+
+        let (small_size, small_cpu) = baseline.unwrap();
+        let (large_size, large_cpu) = largest.unwrap();
+
+        // Export is a linear scan. Allow 3x headroom over the size ratio so
+        // normal per-entry overhead passes while quadratic growth fails.
+        let ceiling = small_cpu * ((large_size / small_size) as u64) * 3;
+        assert!(
+            large_cpu <= ceiling,
+            "export CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
+        );
+    }
+
+    #[test]
+    fn test_bench_core_operation_cpu_cost() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        let report = |label: &str, cpu: u64, mem: u64| {
+            std::println!("{},1,{},{}", label, cpu, mem);
+            assert!(cpu > 0, "{label} was not metered");
+        };
+
+        env.cost_estimate().budget().reset_unlimited();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        let budget = env.cost_estimate().budget();
+        report("register", budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+
+        env.cost_estimate().budget().reset_unlimited();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+        });
+        let budget = env.cost_estimate().budget();
+        report("get_address", budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+
+        env.cost_estimate().budget().reset_unlimited();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_stats(env.clone());
+        });
+        let budget = env.cost_estimate().budget();
+        report("get_stats", budget.cpu_instruction_cost(), budget.memory_bytes_cost());
+    }
+
+    #[test]
+    fn test_bench_failure_path_costs_less_than_success() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+
+        env.cost_estimate().budget().reset_unlimited();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(env.clone(), username(&env, "missing"));
+            assert_eq!(result, Err(ContractError::NotRegistered));
+        });
+        let rejected_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+
+        env.cost_estimate().budget().reset_unlimited();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+        let accepted_cpu = env.cost_estimate().budget().cpu_instruction_cost();
+
+        std::println!("verify_rejected,1,{},0", rejected_cpu);
+        std::println!("verify_accepted,1,{},0", accepted_cpu);
+
+        assert!(rejected_cpu > 0, "rejected call was not metered");
+        // An early rejection must not do more work than the accepted path, or
+        // a missing-username lookup becomes a cheap way to burn ledger budget.
+        assert!(
+            rejected_cpu < accepted_cpu,
+            "rejected verify cost {rejected_cpu} is not below accepted cost {accepted_cpu}"
+        );
     }
 
     #[test]

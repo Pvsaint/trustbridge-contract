@@ -233,6 +233,63 @@ data:   { stellar_address, timestamp }
 
 ---
 
+## Cost and Benchmarks
+
+Every state-changing call consumes ledger CPU instructions and memory. The
+benchmark suite lives with the unit tests in `src/lib.rs` under the
+`// === Cost benchmarks` section and reports metered cost per operation using
+`env.cost_estimate().budget()`.
+
+```bash
+make bench            # print CPU/memory cost for every benchmarked operation
+make bench-export     # export-only run, results written to bench-results.txt
+```
+
+Output is CSV so it can be diffed between branches:
+
+```
+operation,size,cpu_instructions,memory_bytes
+get_all_registered,1,...,...
+get_all_registered,10,...,...
+get_all_registered,50,...,...
+get_all_registered,100,...,...
+```
+
+### What is benchmarked
+
+| Benchmark | Covers |
+|-----------|--------|
+| `test_bench_export_cpu_cost` | `get_all_registered` at registry sizes 1, 10, 50, 100 |
+| `test_bench_core_operation_cpu_cost` | `register`, `get_address`, `get_stats` |
+| `test_bench_failure_path_costs_less_than_success` | Rejected `verify` versus accepted `verify` |
+
+### Regression guards
+
+Absolute instruction counts shift between `soroban-sdk` releases, so the suite
+asserts on shape rather than fixed numbers:
+
+- Export cost is **monotonic** in registry size. A drop means the export stopped
+  visiting every record.
+- Export cost at size 100 stays within **3x the size ratio** of the size 1
+  baseline. This passes for a linear scan and fails for quadratic growth.
+- A rejected call costs **strictly less** than the equivalent accepted call, so
+  a missing-username lookup cannot become a cheap way to burn ledger budget.
+
+### Caveats
+
+- Benchmarks run in the native test host, not in WASM. Numbers are useful for
+  comparing branches and spotting complexity regressions, not for predicting
+  exact mainnet fees. Use `stellar contract invoke` against testnet for fee
+  estimates.
+- The measured section resets the budget to unlimited. This keeps cost tracking
+  on while removing the ledger ceiling that a 100-entry export would otherwise
+  trip mid-measurement.
+- `get_all_registered` is admin-only and scans the full index. At large
+  contributor counts, prefer event indexing (see
+  [EVENT_INDEXING.md](EVENT_INDEXING.md)) over repeated full exports.
+
+---
+
 ## CLI Tips
 
 - Use `--` to separate Stellar CLI flags from contract arguments

@@ -13,8 +13,10 @@ ADMIN       ?= $(shell $(STELLAR) keys address $(SOURCE) 2>/dev/null || echo "")
 CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
+BENCH_OUT   ?= bench-results.txt
 
-.PHONY: help build build-legacy test fuzz fmt lint check ci clean deploy-testnet deploy-mainnet \
+.PHONY: help build build-legacy test fuzz bench bench-export fmt lint check ci clean \
+        deploy-testnet deploy-mainnet \
         invoke-register invoke-lookup invoke-init invoke-stats install-target
 
 help: ## Show this help
@@ -34,6 +36,13 @@ test: ## Run unit tests
 
 fuzz: ## Run the invariant property fuzzing suite (deterministic seeds)
 	cargo test fuzz -- --nocapture
+
+bench: ## Report CPU/memory cost per contract operation
+	cargo test bench -- --nocapture --test-threads=1
+
+bench-export: ## Write export CPU benchmark results to $(BENCH_OUT)
+	cargo test test_bench_export -- --nocapture --test-threads=1 | tee $(BENCH_OUT)
+	@echo "Benchmark results written to $(BENCH_OUT)"
 
 fmt: ## Check formatting
 	cargo fmt --all -- --check
