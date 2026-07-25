@@ -86,6 +86,14 @@ impl TrustBridgeContract {
         }
     }
 
+    /// Cheap existence check for dashboard/indexer consumers.
+    ///
+    /// Avoids deserializing the full `ContributorRecord` when callers only
+    /// need to know whether a `github_username` is registered (Wave #40).
+    pub fn has_record(env: Env, github_username: String) -> bool {
+        has_record(&env, &github_username)
+    }
+
     /// Removes a registration. Callable by the registrant or the admin.
     ///
     /// `caller` must sign the transaction and must equal either the contract
@@ -889,6 +897,20 @@ mod test {
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
             assert_eq!(TrustBridgeContract::get_all_registered(env.clone()).unwrap().len(), 1);
+        });
+    }
+
+    // Wave #40: has_record lookup optimization for dashboard/indexer consumers.
+    #[test]
+    fn test_has_record_reflects_registration_state() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert!(!TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            assert!(TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
         });
     }
 
