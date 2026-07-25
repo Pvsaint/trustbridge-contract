@@ -27,3 +27,12 @@ of `get_address`:
 Tests for this behavior live alongside the contract in `src/lib.rs`
 (`test_has_record_reflects_registration_state`) and `src/storage.rs`
 (`test_has_record_true_after_set_record`).
+
+## Paginated registry reads (Wave #41)
+
+`get_all_registered` returns the entire index in one call, which doesn't
+scale as the registry grows. Use `get_registered_page(offset, limit)`
+instead when syncing incrementally — it walks the same admin-gated index but
+in bounded chunks, so a dashboard/indexer sync job can page through without
+risking a resource-limit failure on a large registry. See
+`test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.

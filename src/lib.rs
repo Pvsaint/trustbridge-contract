@@ -11,7 +11,7 @@ pub use storage::{ContributorRecord, Stats};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::storage::{
-    add_to_index, get_admin, get_count, get_index, get_record, get_stats as read_stats, has_record,
+    add_to_index, get_admin, get_count, get_index, get_index_page, get_record, get_stats as read_stats, has_record,
     get_verified_count as storage_get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
     set_record, set_verified_count, ADMIN_KEY,
 };
@@ -128,6 +128,31 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Returns a page of registered (github_username, stellar_address) pairs
+    /// starting at `offset`, up to `limit` entries. Admin-only, like
+    /// `get_all_registered`, but avoids materializing the whole registry in
+    /// one call for large indexes (Wave #41).
+    pub fn get_registered_page(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<(String, Address)>, ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let page = get_index_page(&env, offset, limit);
+        let mut result = Vec::new(&env);
+        for i in 0..page.len() {
+            let username = page.get(i).unwrap();
+            if let Some(record) = get_record(&env, &username) {
+                result.push_back((username, record.stellar_address));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Returns the full registry. Admin-only.
@@ -911,6 +936,27 @@ mod test {
             assert!(!TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
             assert!(TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
+        });
+    }
+
+    // Wave #41: get_registered_page pagination for indexer/dashboard consumers.
+    #[test]
+    fn test_get_registered_page_paginates_and_gates_on_admin() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), other.clone()).unwrap();
+
+            let page = TrustBridgeContract::get_registered_page(env.clone(), 0, 1).unwrap();
+            assert_eq!(page.len(), 1);
+            assert_eq!(page.get(0).unwrap().0, username(&env, "alice"));
+
+            let page2 = TrustBridgeContract::get_registered_page(env.clone(), 1, 1).unwrap();
+            assert_eq!(page2.len(), 1);
+            assert_eq!(page2.get(0).unwrap().0, username(&env, "bob"));
         });
     }
 
