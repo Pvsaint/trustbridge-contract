@@ -1,3 +1,7 @@
+// Helper module staged ahead of its call sites: the items below are part of the
+// contract's internal toolkit and are covered by this module's own tests, but
+// are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 /// Enhanced error context and handling for TrustBridge contract.
 ///
 /// This module provides more detailed error information and recovery hints
@@ -91,6 +95,7 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::CooldownActive => ErrorCategory::Transient,
         ContractError::InvalidVersion => ErrorCategory::Validation,
         ContractError::InvalidRole => ErrorCategory::Validation,
+        ContractError::InvalidUsername => ErrorCategory::Validation,
     }
 }
 

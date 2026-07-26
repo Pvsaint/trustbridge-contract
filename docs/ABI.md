@@ -51,7 +51,12 @@ enum Role {
 | 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
-| 11 | `InvalidUsername` | `github_username` is not a well-formed GitHub handle |
+| 11 | `InvalidUsername` | Username is empty, over `max_username_len`, or contains disallowed characters |
+
+`ContractError::from_code(u32)` maps every code in this table back to the typed
+variant and returns `None` for any unrecognized code. All ten codes round-trip
+through `from_code(variant.code()) == Some(variant)` — verified by the unit
+tests in `src/lib.rs` (`test_from_code_round_trips_all_variants`).
 
 ---
 
@@ -80,9 +85,9 @@ Register or update a GitHub username mapping.
 
 | | |
 |---|---|
-| **Auth** | `stellar_address` must sign |
+| **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `InvalidUsername` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername` |
 | **Events** | `RegisteredEvent` |
 
 **Username validation:**
@@ -115,6 +120,10 @@ Behavior:
 
 - New username → increment `count`, append to `idx`
 - Existing username → update record; reset `verified` if address changed
+- Existing username pointed at a new address → the **currently registered
+  address must also authorize the call**. Without its signature the invocation
+  fails at auth, so a username cannot be taken over by whoever calls `register`
+  next.
 - Cold-start registration from an initialized empty registry must expose the
   new record through both `get_address` and admin `get_all_registered`; this is
   covered by the Wave #50 regression test.
@@ -122,13 +131,66 @@ Behavior:
   cleared until the admin verifies the updated address. The Wave #49 regression
   test covers re-verification against the new address.
 
-A rejected call leaves counters and the export index untouched, because
-validation runs before any signature is verified and before any storage write.
+**Username rules** (enforced on-chain, checked before auth):
+
+| Rule | Value |
+|------|-------|
+| Length | 1 to 39 characters (read `max_username_len` rather than hardcoding 39) |
+| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
+| First and last character | Must be alphanumeric |
+
+Anything else fails with `InvalidUsername` before any signature is verified and
+before any storage write, so a rejected call leaves counters and the export
+index untouched. Underscores are accepted even though GitHub itself disallows
+them, so registrations made before validation existed stay readable and
+removable.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
   -- register --github-username octocat --stellar-address G...
 ```
+
+---
+
+### `max_username_len() -> u32`
+
+Returns the maximum accepted username length (currently `39`). Clients should
+read this instead of hardcoding the limit, so relaxing the guard does not
+require a client release.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+---
+
+### `is_username_valid(github_username: String) -> bool`
+
+Reports whether a username would pass the `register` guard, so a dashboard can
+validate input before asking the user to sign.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+---
+
+### `usernames_match(a: String, b: String) -> bool`
+
+Case-insensitive username equality, matching GitHub's own semantics. Off-chain
+verification workflows use this to match a registration against a GitHub
+identity without depending on the stored casing.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+Cost is linear in the number of comparisons and allocation-free — the
+comparison runs on a fixed stack buffer. `make bench-username` records the
+metered CPU/memory cost across 10–200 comparisons.
 
 ---
 
@@ -199,32 +261,53 @@ Mark a contributor as verified after off-chain GitHub identity confirmation.
 
 | | |
 |---|---|
-| **Auth** | Admin |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotRegistered`, `AlreadyVerified` |
+| **Errors** | `NotInitialized`, `NotRegistered`, `AlreadyVerified`, `NotAuthorized` |
 | **Events** | `VerifiedEvent` |
 
+The `caller` argument is required so the contract can validate which identity
+signed the transaction. Both the admin and any address granted `Role::Verifier`
+via `set_role` may call this function. An address without either role returns
+`NotAuthorized`.
+
 ```bash
+# Admin calling verify
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- verify --github-username octocat
+  -- verify --caller G... --github-username octocat
+
+# Verifier-role holder calling verify
+stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
+  -- verify --caller G... --github-username octocat
 ```
 
 ---
 
 ### `revoke_verification(github_username: String) -> Result<(), ContractError>`
 
-Revoke verification for a registered contributor. Admin-only.
+Revoke verification for a registered contributor.
 
 | | |
 |---|---|
-| **Auth** | Admin |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified` |
+| **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified`, `NotAuthorized` |
 | **Events** | `VerificationRevokedEvent` |
 
+Like `verify`, the `caller` argument enables on-chain role enforcement. Only
+the contract admin or a `Verifier`-role holder may revoke verification. An
+`Upgrader`-role holder or an address with no role returns `NotAuthorized`.
+
 ```bash
+# Admin revoking verification
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- revoke_verification --github-username octocat
+  -- revoke_verification --caller G... --github-username octocat
+
+# Verifier-role holder revoking verification
+stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
+  -- revoke_verification --caller G... --github-username octocat
 ```
 
 ---
@@ -334,49 +417,64 @@ All events are defined with `#[contractevent]` and include a topic field for fil
 ### RegisteredEvent
 
 ```
-topics: ["RegisteredEvent", github_username]
+topics: ["registered_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
 ### RemovedEvent
 
 ```
-topics: ["RemovedEvent", github_username]
+topics: ["removed_event", github_username]
 data:   { stellar_address, timestamp }
 ```
+
+`RemovedEvent` is the only signal an indexer receives that a record is gone, so
+its payload is treated as a compatibility surface:
+
+- `github_username` is a **topic**, so subscribers can filter server-side.
+- `stellar_address` is the address that was registered at removal time, and
+  `timestamp` is the ledger timestamp of the removal — together they let a
+  consumer reconstruct the retired record without a follow-up read.
+- A **failed** `remove` (wrong caller, unknown username) publishes no event.
+
+`test_removed_event_payload_is_complete` asserts the full published event
+against a fully-specified `RemovedEvent`, plus the topic count and topic symbol
+independently, so renaming the event or dropping a field fails the build rather
+than silently breaking every subscriber's filter.
+`test_removed_event_not_published_on_failed_remove` covers the failure path.
 
 ### VerifiedEvent
 
 ```
-topics: ["VerifiedEvent", github_username]
+topics: ["verified_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
 ### VerificationRevokedEvent
 
 ```
-topics: ["VerificationRevokedEvent", github_username]
+topics: ["verification_revoked_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
 ### UpgradedEvent
 
 ```
-topics: ["UpgradedEvent", new_wasm_hash]
+topics: ["upgraded_event", new_wasm_hash]
 data:   { version, timestamp }
 ```
 
 ### PausedEvent / UnpausedEvent
 
 ```
-topics: ["PausedEvent" / "UnpausedEvent", admin]
+topics: ["paused_event" / "unpaused_event", admin]
 data:   { timestamp }
 ```
 
 ### RoleGrantedEvent / RoleRevokedEvent
 
 ```
-topics: ["RoleGrantedEvent" / "RoleRevokedEvent", address]
+topics: ["role_granted_event" / "role_revoked_event", address]
 data:   { role, admin, timestamp }
 ```
 
@@ -508,7 +606,8 @@ get_all_registered,100,...,...
 
 | Benchmark | Covers |
 |-----------|--------|
-| `test_bench_export_cpu_cost` | `get_all_registered` at registry sizes 1, 10, 50, 100 |
+| `test_bench_export_cpu_cost` | `get_all_registered` at registry sizes 10, 20, 40, 80 |
+| `test_bench_username_case_normalization` | `usernames_match` at 10, 50, 100, 200 comparisons (`make bench-username`) |
 | `test_bench_core_operation_cpu_cost` | `register`, `get_address`, `get_stats` |
 | `test_bench_failure_path_costs_less_than_success` | Rejected `verify` versus accepted `verify` |
 
@@ -519,8 +618,13 @@ asserts on shape rather than fixed numbers:
 
 - Export cost is **monotonic** in registry size. A drop means the export stopped
   visiting every record.
-- Export cost at size 100 stays within **3x the size ratio** of the size 1
-  baseline. This passes for a linear scan and fails for quadratic growth.
+- Export cost at the largest size stays within **3x the size ratio** of the
+  smallest-size baseline. This passes for a linear scan and fails for quadratic
+  growth.
+- Username case normalization is **monotonic** in comparison count and obeys the
+  same 3x linearity ceiling. Normalization runs on a fixed stack buffer, so a
+  regression that introduces per-comparison allocation or a nested scan fails
+  here.
 - A rejected call costs **strictly less** than the equivalent accepted call, so
   a missing-username lookup cannot become a cheap way to burn ledger budget.
 
@@ -533,6 +637,11 @@ asserts on shape rather than fixed numbers:
 - The measured section resets the budget to unlimited. This keeps cost tracking
   on while removing the ledger ceiling that a 100-entry export would otherwise
   trip mid-measurement.
+- `get_all_registered` reads one ledger entry per record, and Soroban rejects an
+  invocation whose footprint exceeds **100 ledger entries**. The export
+  benchmark therefore tops out below that ceiling; past roughly 100
+  contributors, `get_registered_page` / `get_registered_paginated` is the only
+  workable export path.
 - `get_all_registered` is admin-only and scans the full index. At large
   contributor counts, prefer event indexing (see
   [EVENT_INDEXING.md](EVENT_INDEXING.md)) over repeated full exports.

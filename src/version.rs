@@ -6,6 +6,10 @@
 //! the `version` and `is_compatible` contract functions, which the generated
 //! TypeScript bindings package uses to guard against ABI drift.
 
+// Some items here are staged ahead of their call sites: they are covered by
+// this module's own tests but are not yet wired into `lib.rs`.
+#![allow(dead_code)]
+
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Version {
@@ -129,7 +133,6 @@ impl CompatibilityInfo {
 mod tests {
     use super::*;
     extern crate alloc;
-    use alloc::format;
 
     #[test]
     fn test_version_comparison() {
@@ -164,7 +167,8 @@ mod tests {
     #[test]
     fn test_version_display() {
         let v = Version::new(1, 2, 3);
-        assert_eq!(std::format!("{}", v), "1.2.3");
+        let s = alloc::format!("{}", v);
+        assert_eq!(s, "1.2.3");
     }
 
     #[test]
@@ -220,5 +224,66 @@ mod tests {
         assert_ne!(MigrationState::NotRequired, MigrationState::Pending);
         assert_ne!(MigrationState::InProgress, MigrationState::Completed);
         assert_ne!(MigrationState::Completed, MigrationState::Failed);
+    }
+
+    // ABI breaking-change CI gate (Contract Wave #38).
+    //
+    // These pin the rules a CI gate relies on to decide whether a proposed
+    // version bump is allowed to accompany an ABI-breaking change, and
+    // whether a migration must run before the new version is trusted.
+
+    #[test]
+    fn gate_major_bump_is_flagged_as_breaking() {
+        let current = Version::new(1, 4, 2);
+        let target = current.bump_major();
+
+        let info = CompatibilityInfo::for_upgrade(current, target);
+        assert!(info.breaking_changes);
+        assert!(info.data_migration_required);
+    }
+
+    #[test]
+    fn gate_minor_and_patch_bumps_are_not_breaking() {
+        let current = Version::new(1, 4, 2);
+
+        let minor = CompatibilityInfo::for_upgrade(current, current.bump_minor());
+        assert!(!minor.breaking_changes);
+        assert!(minor.data_migration_required);
+
+        let patch = CompatibilityInfo::for_upgrade(current, current.bump_patch());
+        assert!(!patch.breaking_changes);
+        assert!(!patch.data_migration_required);
+    }
+
+    #[test]
+    fn gate_downgrade_is_not_treated_as_a_forward_migration() {
+        // A CI gate must not let a "downgrade" masquerade as a safe
+        // no-migration bump: needs_migration() only trips for forward
+        // moves within the same major line or ahead.
+        let current = Version::new(2, 0, 0);
+        let older = Version::new(1, 9, 9);
+
+        assert!(!current.needs_migration(older));
+    }
+
+    #[test]
+    fn gate_same_version_requires_no_migration_and_is_not_breaking() {
+        let v = Version::new(3, 1, 4);
+        let info = CompatibilityInfo::for_upgrade(v, v);
+
+        assert!(!info.migration_required);
+        assert!(!info.breaking_changes);
+        assert!(!info.data_migration_required);
+    }
+
+    #[test]
+    fn gate_compatibility_check_rejects_lower_major() {
+        // is_compatible_with() is the check a caller uses to assert a
+        // deployed contract is new enough; a lower major must never read
+        // as compatible even if minor/patch look newer.
+        let deployed = Version::new(1, 9, 9);
+        let minimum_required = Version::new(2, 0, 0);
+
+        assert!(!deployed.is_compatible_with(minimum_required));
     }
 }

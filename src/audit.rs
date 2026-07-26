@@ -1,8 +1,12 @@
+// Helper module staged ahead of its call sites: the items below are part of the
+// contract's internal toolkit and are covered by this module's own tests, but
+// are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 /// Audit logging for tracking contract operations and admin actions.
 ///
 /// This module provides structured audit events for compliance and debugging,
 /// including admin actions, registrations, and verification events.
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{Address, String};
 
 /// Types of audit events that can be recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
