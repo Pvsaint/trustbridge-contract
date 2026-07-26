@@ -1,6 +1,8 @@
-use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::ContractError;
+
+// ── Storage keys ────────────────────────────────────────────────────────────
 
 pub const REG_KEY: Symbol = symbol_short!("reg");
 pub const ADMIN_KEY: Symbol = symbol_short!("admin");
@@ -12,6 +14,54 @@ pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
+pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
+pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chunkcnt");
+pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
+
+/// Entries per index chunk. Keeps a single chunk read well under the ledger
+/// entry size limit while still amortising reads across pages.
+pub const CHUNK_SIZE: u32 = 100;
+
+/// Page size used when a caller passes `limit = 0`.
+pub const DEFAULT_PAGE_LIMIT: u32 = 50;
+/// Upper bound on a single export page, to keep the response under the
+/// transaction result size limit.
+pub const MAX_PAGE_LIMIT: u32 = 200;
+
+/// Persistent entries are bumped when their remaining TTL drops below this.
+pub const TTL_THRESHOLD: u32 = 100_000;
+/// Ledgers of TTL to restore on bump (~60 days at 5s ledgers).
+pub const TTL_BUMP: u32 = 1_000_000;
+
+/// Key for the version stored at `storage::get_version` / `set_version`.
+/// Aliased as VERSION_KEY for callers that use that name.
+pub const VERSION_KEY: Symbol = VER_KEY;
+
+/// Key prefix for chunked username index entries.
+pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
+/// Key for the count of chunks in the chunked index.
+pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
+/// Key for the per-user last-action timestamp (cooldown tracking).
+pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
+
+// ── TTL constants (ledger-based, ~7 days at 5 s/ledger) ─────────────────────
+
+/// Minimum TTL threshold before a bump is triggered (≈ 3 days).
+pub const TTL_THRESHOLD: u32 = 51840;
+/// Target TTL after a bump (≈ 7 days).
+pub const TTL_BUMP: u32 = 120960;
+
+// ── Pagination constants ─────────────────────────────────────────────────────
+
+pub const DEFAULT_PAGE_LIMIT: u32 = 20;
+pub const MAX_PAGE_LIMIT: u32 = 100;
+
+// ── Chunked-index constants ──────────────────────────────────────────────────
+
+/// Maximum number of usernames per chunk slice.
+pub const CHUNK_SIZE: u32 = 50;
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 // ─── TTL policy (Wave #7) ────────────────────────────────────────────────────
 //
@@ -55,6 +105,57 @@ pub struct ContributorRecord {
     pub verified: bool,
 }
 
+/// Provenance of the currently deployed WASM executable (Wave #24).
+///
+/// `upgrade` previously left no queryable trace of what it did — it wrote a
+/// bare timestamp to `LAST_UPG_KEY` and published an event. Events are not
+/// contract state: an auditor asking "what is deployed right now, and what did
+/// it replace?" had to reconstruct the answer by replaying the whole event
+/// history, and could not do it from a contract call at all.
+///
+/// This is the answer as a single readable record. `previous_wasm_hash` is what
+/// makes it a chain rather than a snapshot: each record names its predecessor,
+/// so the lineage can be walked backwards through historical events even though
+/// only the head is stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct WasmProvenance {
+    /// Hash of the WASM currently executing.
+    pub wasm_hash: BytesN<32>,
+    /// Hash this one replaced. `None` for the first upgrade after deployment.
+    pub previous_wasm_hash: Option<BytesN<32>>,
+    /// Address that authorised the upgrade.
+    pub upgraded_by: Address,
+    /// Ledger timestamp the upgrade was applied.
+    pub upgraded_at: u64,
+    /// Contract version recorded at upgrade time.
+    pub version: (u32, u32, u32),
+    /// Whether the hash had been attested before it was applied.
+    pub attested: bool,
+}
+
+/// An admin's advance declaration of the WASM hash they intend to deploy.
+///
+/// Optional two-step upgrade. When an attestation is live, `upgrade` will only
+/// accept the hash it names — so a compromised admin key cannot swap in a
+/// different binary at the moment of the upgrade without first publishing that
+/// intent, on-chain, ahead of time.
+///
+/// The expiry is the point: an attestation that never lapsed would be a
+/// standing authorisation for that hash, which is strictly worse than none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct WasmAttestation {
+    /// Hash the admin has declared they intend to deploy.
+    pub wasm_hash: BytesN<32>,
+    /// Ledger timestamp after which this attestation is no longer valid.
+    pub expires_at: u64,
+    /// Address that published the attestation.
+    pub attested_by: Address,
+    /// Ledger timestamp the attestation was published.
+    pub attested_at: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct Stats {
@@ -70,6 +171,8 @@ pub struct ExportPage {
     pub total: u32,
     pub has_more: bool,
 }
+
+// ── Initialization / admin ───────────────────────────────────────────────────
 
 pub fn require_initialized(env: &Env) -> Result<(), ContractError> {
     if env.storage().instance().has(&ADMIN_KEY) {
@@ -87,27 +190,13 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
         .ok_or(ContractError::NotInitialized)
 }
 
-pub fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-}
-
-pub fn set_paused_state(env: &Env, paused: bool) {
-    env.storage().instance().set(&PAUSED_KEY, &paused);
-}
-
-pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused(env) {
-        Err(ContractError::Paused)
-    } else {
-        Ok(())
-    }
-}
-
 pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
     let key = (REG_KEY, github_username.clone());
     let record: Option<ContributorRecord> = env.storage().persistent().get(&key);
     if record.is_some() {
-        env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
     }
     record
 }
@@ -115,7 +204,9 @@ pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorReco
 pub fn set_record(env: &Env, github_username: &String, record: &ContributorRecord) {
     let key = (REG_KEY, github_username.clone());
     env.storage().persistent().set(&key, record);
-    env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
 }
 
 /// Extends a single record's TTL without deserialising it (Wave #7).
@@ -142,6 +233,12 @@ pub fn remove_record(env: &Env, github_username: &String) {
     env.storage().persistent().remove(&key);
 }
 
+pub fn has_record(env: &Env, github_username: &String) -> bool {
+    get_record(env, github_username).is_some()
+}
+
+// ── Counters ─────────────────────────────────────────────────────────────────
+
 pub fn get_count(env: &Env) -> u32 {
     env.storage().instance().get(&COUNT_KEY).unwrap_or(0)
 }
@@ -158,16 +255,6 @@ pub fn set_verified_count(env: &Env, count: u32) {
     env.storage().instance().set(&VCOUNT_KEY, &count);
 }
 
-/// Returns the version recorded at initialize time, or `None` for instances
-/// deployed before version tracking existed.
-pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
-    env.storage().instance().get(&VERSION_KEY)
-}
-
-pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
-    env.storage().instance().set(&VERSION_KEY, version);
-}
-
 pub fn get_index(env: &Env) -> Vec<String> {
     env.storage()
         .instance()
@@ -179,7 +266,21 @@ pub fn set_index(env: &Env, index: &Vec<String>) {
     env.storage().instance().set(&INDEX_KEY, index);
 }
 
-// Chunked Username Index functions (Issue #2)
+/// Returns a page of usernames from the flat index starting at `offset`.
+pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
+    let index = get_index(env);
+    let mut page = Vec::new(env);
+    let end = (offset.saturating_add(limit)).min(index.len());
+    for i in offset..end {
+        if let Some(u) = index.get(i) {
+            page.push_back(u);
+        }
+    }
+    page
+}
+
+// ── Chunked username index ───────────────────────────────────────────────────
+
 pub fn get_chunk_count(env: &Env) -> u32 {
     env.storage().instance().get(&CHUNK_CNT_KEY).unwrap_or(0)
 }
@@ -196,7 +297,9 @@ pub fn get_chunk(env: &Env, chunk_idx: u32) -> Vec<String> {
         .get(&key)
         .unwrap_or_else(|| Vec::new(env));
     if !chunk.is_empty() {
-        env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
     }
     chunk
 }
@@ -204,7 +307,9 @@ pub fn get_chunk(env: &Env, chunk_idx: u32) -> Vec<String> {
 pub fn set_chunk(env: &Env, chunk_idx: u32, chunk: &Vec<String>) {
     let key = (CHUNK_KEY, chunk_idx);
     env.storage().persistent().set(&key, chunk);
-    env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
 }
 
 pub fn add_to_index(env: &Env, github_username: &String) {
@@ -268,6 +373,31 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
     }
 }
 
+/// Returns a slice of the username index: up to `limit` entries starting at
+/// `offset`. Out-of-range offsets yield an empty page rather than an error.
+pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
+    let index = get_index(env);
+    let mut page = Vec::new(env);
+
+    let effective_limit = if limit == 0 {
+        DEFAULT_PAGE_LIMIT
+    } else {
+        limit.min(MAX_PAGE_LIMIT)
+    };
+
+    if offset >= index.len() {
+        return page;
+    }
+
+    let end = offset.saturating_add(effective_limit).min(index.len());
+    for i in offset..end {
+        if let Some(username) = index.get(i) {
+            page.push_back(username);
+        }
+    }
+    page
+}
+
 // Paginated export implementation (Issue #1 & #3)
 pub fn get_registered_paginated_internal(
     env: &Env,
@@ -318,6 +448,8 @@ pub fn get_registered_paginated_internal(
     })
 }
 
+// ── Stats ────────────────────────────────────────────────────────────────────
+
 // Wave #41: build_stats is the single centralized constructor for `Stats`.
 // All stats reads (get_stats, and any future indexer/dashboard aggregate
 // endpoints) should route through it rather than building `Stats { .. }`
@@ -330,25 +462,7 @@ pub fn get_stats(env: &Env) -> Stats {
     build_stats(get_count(env), get_verified_count(env))
 }
 
-pub fn has_record(env: &Env, github_username: &String) -> bool {
-    get_record(env, github_username).is_some()
-}
-
-pub fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-}
-
-pub fn set_paused(env: &Env, paused: bool) {
-    env.storage().instance().set(&PAUSED_KEY, &paused);
-}
-
-pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused(env) {
-        Err(ContractError::Paused)
-    } else {
-        Ok(())
-    }
-}
+// ── Cooldown / upgrade timelock ───────────────────────────────────────────────
 
 pub fn get_cooldown(env: &Env) -> u64 {
     env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
@@ -360,6 +474,34 @@ pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
         .set(&COOLDOWN_KEY, &cooldown_seconds);
 }
 
+// ─── WASM provenance & attestation (Wave #24) ────────────────────────────────
+
+/// Provenance of the currently deployed WASM. `None` before the first upgrade.
+pub fn get_wasm_provenance(env: &Env) -> Option<WasmProvenance> {
+    env.storage().instance().get(&PROV_KEY)
+}
+
+pub fn set_wasm_provenance(env: &Env, provenance: &WasmProvenance) {
+    env.storage().instance().set(&PROV_KEY, provenance);
+}
+
+/// The pending upgrade attestation, if one has been published.
+///
+/// Returns the raw record regardless of expiry — callers decide what to do with
+/// a lapsed attestation, and `get_wasm_attestation` is also a read endpoint
+/// where seeing the expired value is useful for diagnosis.
+pub fn get_wasm_attestation(env: &Env) -> Option<WasmAttestation> {
+    env.storage().instance().get(&ATTEST_KEY)
+}
+
+pub fn set_wasm_attestation(env: &Env, attestation: &WasmAttestation) {
+    env.storage().instance().set(&ATTEST_KEY, attestation);
+}
+
+pub fn remove_wasm_attestation(env: &Env) {
+    env.storage().instance().remove(&ATTEST_KEY);
+}
+
 pub fn get_last_upgrade(env: &Env) -> u64 {
     env.storage().instance().get(&LAST_UPG_KEY).unwrap_or(0)
 }
@@ -368,13 +510,39 @@ pub fn set_last_upgrade(env: &Env, timestamp: u64) {
     env.storage().instance().set(&LAST_UPG_KEY, &timestamp);
 }
 
-pub fn get_version(env: &Env) -> (u32, u32, u32) {
-    env.storage().instance().get(&VER_KEY).unwrap_or((1, 0, 0))
+// ── Per-user action cooldown (Wave #33) ──────────────────────────────────────
+
+/// Records the ledger timestamp of the last mutating action for `github_username`.
+pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
+    let key = (LAST_ACT_KEY, github_username.clone());
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
 }
 
-pub fn set_version(env: &Env, version: (u32, u32, u32)) {
-    env.storage().instance().set(&VER_KEY, &version);
+/// Returns the timestamp of the last recorded action for `github_username`, or 0.
+pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
+    let key = (LAST_ACT_KEY, github_username.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
 }
+
+/// Returns true if `github_username` is still within the WASM-upgrade cooldown
+/// window for per-user rate-limiting.
+pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
+    let cooldown = get_cooldown(env);
+    if cooldown == 0 {
+        return false;
+    }
+    let last = get_last_action(env, github_username);
+    if last == 0 {
+        return false;
+    }
+    let now = env.ledger().timestamp();
+    now < last.saturating_add(cooldown)
+}
+
+// ── Role-based access control ─────────────────────────────────────────────────
 
 pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
     env.storage().persistent().get(&(ROLE_KEY, address.clone()))
@@ -392,6 +560,45 @@ pub fn remove_role(env: &Env, address: &Address) {
         .remove(&(ROLE_KEY, address.clone()));
 }
 
+/// True when `address` is the contract admin.
+pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
+    matches!(get_admin(env), Ok(admin) if admin == *address)
+}
+
+/// Timestamp of `github_username`'s last cooldown-tracked action, or 0 if it
+/// has none. Cooldown is tracked per username rather than globally so one
+/// contributor's activity cannot block everyone else's.
+pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(LAST_ACT_KEY, github_username.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
+    let key = (LAST_ACT_KEY, github_username.clone());
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+/// True when the configured cooldown has not yet elapsed since
+/// `github_username`'s last tracked action. A cooldown of 0 disables the
+/// check entirely.
+pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
+    let cooldown = get_cooldown(env);
+    if cooldown == 0 {
+        return false;
+    }
+    let last = get_last_action(env, github_username);
+    if last == 0 {
+        return false;
+    }
+    env.ledger().timestamp() < last.saturating_add(cooldown)
+}
+
+#[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.
 pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
     if let Ok(admin) = get_admin(env) {
         if *address == admin {

@@ -1,11 +1,20 @@
+// Helper module staged ahead of its call sites: the items below are part of the
+// contract's internal toolkit and are covered by this module's own tests, but
+// are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 /// Batch operation utilities for efficient contract interactions.
 ///
 /// This module provides helpers for performing multiple operations efficiently,
 /// particularly useful for dashboard syncing and bulk verifications.
-use soroban_sdk::String;
+use soroban_sdk::{contracttype, String};
 
 /// Result of a single batch operation.
-#[derive(Clone, Debug)]
+///
+/// `#[contracttype]` so it can cross the contract boundary — these types
+/// existed but were plain Rust structs, which meant nothing in this module
+/// could ever be returned from a contract function.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchOperationResult {
     /// Whether the operation succeeded
     pub success: bool,
@@ -36,6 +45,7 @@ impl BatchOperationResult {
 }
 
 /// Summary statistics for batch operations.
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchSummary {
     pub total: u32,

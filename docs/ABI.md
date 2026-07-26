@@ -27,6 +27,19 @@ struct Stats {
 }
 ```
 
+### BatchSummary
+
+Returned by `batch_verify`. `success_rate` is an integer percentage.
+
+```rust
+struct BatchSummary {
+    total: u32,
+    successful: u32,
+    failed: u32,
+    success_rate: u32,
+}
+```
+
 ### Role (u32 discriminant)
 
 ```rust
@@ -51,7 +64,12 @@ enum Role {
 | 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
-| 12 | `InvalidBatchSize` | Batch is empty or exceeds `max_batch_size` |
+| 11 | `InvalidUsername` | Username is empty, over `max_username_len`, or contains disallowed characters |
+
+`ContractError::from_code(u32)` maps every code in this table back to the typed
+variant and returns `None` for any unrecognized code. All ten codes round-trip
+through `from_code(variant.code()) == Some(variant)` — verified by the unit
+tests in `src/lib.rs` (`test_from_code_round_trips_all_variants`).
 
 ---
 
@@ -80,15 +98,45 @@ Register or update a GitHub username mapping.
 
 | | |
 |---|---|
-| **Auth** | `stellar_address` must sign |
+| **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `InvalidUsername` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername` |
 | **Events** | `RegisteredEvent` |
+
+**Username validation:**
+
+`github_username` must be a well-formed GitHub handle or the call fails with
+`InvalidUsername` (code 11) before any authentication or storage write:
+
+| Rule | Accepted | Rejected |
+|---|---|---|
+| Length 1–39 characters | `a`, `octocat` | `""`, 40+ characters |
+| ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space`, `café` |
+| First and last character alphanumeric | `alice`, `7` | `-invalid`, `invalid-`, `_leading`, `trailing_` |
+| No consecutive hyphens | `foo-bar-baz` | `foo--bar` |
+
+Two deliberate choices:
+
+- **Underscores are accepted** even though GitHub itself rejects them. Records
+  written before validation existed must stay removable, and `remove` looks a
+  username up by exact key — a name that cannot be expressed could never be
+  cleaned up.
+- **Validation applies to `register` only.** Lookups, `remove`, `verify` and
+  `revoke_verification` accept any username, for the same reason.
+
+Checks run *before* `require_auth`, so a malformed username is rejected at the
+cheapest point and the caller is not charged for an auth check on an invocation
+that can never succeed. It is also what stops an unbounded key from reaching
+persistent storage.
 
 Behavior:
 
 - New username → increment `count`, append to `idx`
 - Existing username → update record; reset `verified` if address changed
+- Existing username pointed at a new address → the **currently registered
+  address must also authorize the call**. Without its signature the invocation
+  fails at auth, so a username cannot be taken over by whoever calls `register`
+  next.
 - Cold-start registration from an initialized empty registry must expose the
   new record through both `get_address` and admin `get_all_registered`; this is
   covered by the Wave #50 regression test.
@@ -100,7 +148,7 @@ Behavior:
 
 | Rule | Value |
 |------|-------|
-| Length | 1 to 39 characters |
+| Length | 1 to 39 characters (read `max_username_len` rather than hardcoding 39) |
 | Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
 | First and last character | Must be alphanumeric |
 
@@ -117,52 +165,45 @@ stellar contract invoke --id $ID --source deployer --network testnet --send=yes 
 
 ---
 
-### `extend_registry_ttl(usernames: Vec<String>) -> Result<u32, ContractError>`
+### `max_username_len() -> u32`
 
-Extend the storage TTL of registry records so they are not archived. Returns the
-number of entries actually extended.
+Returns the maximum accepted username length (currently `39`). Clients should
+read this instead of hardcoding the limit, so relaxing the guard does not
+require a client release.
 
 | | |
 |---|---|
-| **Auth** | None — permissionless |
-| **Mutates** | Yes (TTL only) |
-| **Errors** | `NotInitialized`, `InvalidBatchSize` |
+| **Auth** | None |
+| **Mutates** | No |
 
-Soroban persistent entries expire unless their TTL is extended. Reads and writes
-extend as a side effect, but a record nobody touches for ~30 days is archived and
-becomes unreadable until restored — so a registry with a long tail of inactive
-contributors silently loses its cold entries. This is the keeper operation that
-prevents that: an off-chain job walks the index and calls it periodically for
-entries approaching expiry.
+---
 
-**Permissionless by design.** Extending a TTL only ever preserves data — there is
-no state an attacker could corrupt by calling it — and gating it behind admin
-auth would mean the registry decays whenever the admin key is unavailable. The
-caller pays the fee, which is its own rate limit.
+### `is_username_valid(github_username: String) -> bool`
 
-Usernames that are not registered are skipped rather than erroring: the keeper's
-list is built off-chain and can lag behind removals. Compare the return value
-against the batch length to detect drift.
+Reports whether a username would pass the `register` guard, so a dashboard can
+validate input before asking the user to sign.
 
-**TTL policy** (`src/storage.rs`):
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `TTL_THRESHOLD` | ~30 days | Only extend when fewer than this many ledgers remain |
-| `TTL_BUMP` | ~90 days | Extend to this many ledgers from the current one |
+---
 
-`extend_ttl` is a no-op when the remaining TTL already exceeds the threshold, so
-a hot record does not pay the extension cost on every read.
+### `usernames_match(a: String, b: String) -> bool`
 
-```bash
-make invoke-extend-ttl CONTRACT_ID=$ID USERNAMES='["octocat","alice"]'
-```
+Case-insensitive username equality, matching GitHub's own semantics. Off-chain
+verification workflows use this to match a registration against a GitHub
+identity without depending on the stored casing.
 
-**Benchmark:** `make bench-ttl` writes per-entry CPU and memory cost across a
-size sweep to `bench-ttl-results.txt`. The benchmark asserts cost stays linear in
-batch size — a keeper's per-entry cost determines how many entries it can refresh
-per transaction, so super-linear growth is an operational failure, not just a
-slow test. `make bench-all` runs it alongside the export benchmark.
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+Cost is linear in the number of comparisons and allocation-free — the
+comparison runs on a fixed stack buffer. `make bench-username` records the
+metered CPU/memory cost across 10–200 comparisons.
 
 ---
 
@@ -233,32 +274,95 @@ Mark a contributor as verified after off-chain GitHub identity confirmation.
 
 | | |
 |---|---|
+| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `NotRegistered`, `AlreadyVerified`, `NotAuthorized` |
+| **Events** | `VerifiedEvent` |
+
+The `caller` argument is required so the contract can validate which identity
+signed the transaction. Both the admin and any address granted `Role::Verifier`
+via `set_role` may call this function. An address without either role returns
+`NotAuthorized`.
+
+```bash
+# Admin calling verify
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- verify --caller G... --github-username octocat
+
+# Verifier-role holder calling verify
+stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
+  -- verify --caller G... --github-username octocat
+```
+
+---
+
+### `batch_verify(usernames: Vec<String>) -> Result<BatchSummary, ContractError>`
+
+Verify many contributors in a single invocation — the batched form of `verify`,
+for the dashboard-sync workflow where an off-chain job confirms a page of GitHub
+identities at once. Doing that as N separate invocations costs N transactions,
+N signatures and N rounds of ledger overhead; this is one.
+
+| | |
+|---|---|
 | **Auth** | Admin |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotRegistered`, `AlreadyVerified` |
-| **Events** | `VerifiedEvent` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidBatchSize` |
+| **Events** | One `VerifiedEvent` per newly verified contributor |
+| **Since** | 1.1.0 — gate on `Version::supports_batch_verify` |
+
+**Partial success is the point.** A username that cannot be verified does not
+abort the batch; it is counted as a failure and the rest proceed. A sync of 100
+contributors must not be lost wholesale because one entry was removed or already
+verified since the off-chain job built its list.
+
+| Outcome | Counted as | Notes |
+|---|---|---|
+| Registered and unverified | `successful` | Record updated, `VerifiedEvent` published |
+| Not registered | `failed` | Skipped, batch continues |
+| Already verified | `failed` | Skipped — idempotent, so re-runs are safe |
+
+Inspect the returned `BatchSummary`: a `success_rate` below 100 means some
+entries need attention, **not** that the batch failed. The errors listed above
+are the only conditions that abort the whole call, and all of them invalidate
+every entry rather than a single one.
+
+`verified` is incremented once for the whole batch rather than per entry —
+nothing between the per-entry writes can observe an intermediate value within a
+single invocation.
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- verify --github-username octocat
+  -- batch_verify --usernames '["octocat","alice","bob-smith"]'
 ```
 
 ---
 
 ### `revoke_verification(github_username: String) -> Result<(), ContractError>`
 
-Revoke verification for a registered contributor. Admin-only.
+Revoke verification for a registered contributor.
 
 | | |
 |---|---|
-| **Auth** | Admin |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified` |
+| **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified`, `NotAuthorized` |
 | **Events** | `VerificationRevokedEvent` |
 
+Like `verify`, the `caller` argument enables on-chain role enforcement. Only
+the contract admin or a `Verifier`-role holder may revoke verification. An
+`Upgrader`-role holder or an address with no role returns `NotAuthorized`.
+
 ```bash
+# Admin revoking verification
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- revoke_verification --github-username octocat
+  -- revoke_verification --caller G... --github-username octocat
+
+# Verifier-role holder revoking verification
+stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
+  -- revoke_verification --caller G... --github-username octocat
 ```
 
 ---
@@ -351,7 +455,92 @@ Returns contract version tuple `(major, minor, patch)`.
 
 ### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ContractError>`
 
-Upgrades the executable WASM bytecode of the contract. Subject to admin authentication and upgrade timelock cooldown.
+Upgrades the executable WASM bytecode of the contract. Subject to admin
+authentication and the upgrade timelock cooldown.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `CooldownActive`, `UnattestedWasm`, `AttestationExpired` |
+| **Events** | `UpgradedEvent` |
+
+Records a `WasmProvenance` entry for the new hash: what it replaced, who
+authorised it, when, at what version, and whether it had been attested. The
+record is written *before* the executable is swapped — afterwards the code
+answering the question is the new binary, and what it replaced would be lost.
+
+---
+
+### `attest_upgrade(wasm_hash: BytesN<32>, expires_at: u64) -> Result<(), ContractError>`
+
+Declare in advance the WASM hash you intend to deploy. Admin-only.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `AttestationExpired` (if `expires_at` is not in the future) |
+
+**Optional two-step upgrade.** While an attestation is live, `upgrade` accepts
+only the hash it names — so a compromised admin key cannot swap in a different
+binary at the moment of the upgrade without first publishing that intent
+on-chain, ahead of time, where watchers can see it.
+
+| Situation | `upgrade` behaviour |
+|---|---|
+| No attestation published | Proceeds as before — attestation is opt-in |
+| Attestation matches, unexpired | Proceeds; attestation is consumed; `attested: true` in provenance |
+| Attestation expired | Fails `AttestationExpired`; the stale record is cleared so a retry is not blocked |
+| Hash does not match | Fails `UnattestedWasm`; the attestation is **left in place**, since a mismatch may be an attacker substituting a binary and clearing it would let a second attempt through unchecked |
+
+Attestations are **single-use** — one upgrade, not a standing permission for
+that hash. `expires_at` is mandatory for the same reason: an attestation that
+never lapsed would be a standing authorisation, which is worse than none.
+
+Publishing a new attestation replaces any existing one.
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- attest_upgrade --wasm-hash <hex> --expires-at 1893456000
+```
+
+---
+
+### `clear_attestation() -> Result<(), ContractError>`
+
+Withdraw a pending attestation. Admin-only. The escape hatch for one published
+in error — without it the admin would have to wait out the expiry before
+upgrading to any other hash.
+
+---
+
+### `get_attestation() -> Option<WasmAttestation>`
+
+Returns the pending attestation, if any. Returned regardless of expiry, since
+seeing a lapsed attestation is what explains a rejected upgrade.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+---
+
+### `get_provenance() -> Option<WasmProvenance>`
+
+Returns the provenance of the currently deployed WASM. `None` on an instance
+that has never been upgraded.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_provenance
+```
 
 ---
 
@@ -368,49 +557,64 @@ All events are defined with `#[contractevent]` and include a topic field for fil
 ### RegisteredEvent
 
 ```
-topics: ["RegisteredEvent", github_username]
+topics: ["registered_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
 ### RemovedEvent
 
 ```
-topics: ["RemovedEvent", github_username]
+topics: ["removed_event", github_username]
 data:   { stellar_address, timestamp }
 ```
+
+`RemovedEvent` is the only signal an indexer receives that a record is gone, so
+its payload is treated as a compatibility surface:
+
+- `github_username` is a **topic**, so subscribers can filter server-side.
+- `stellar_address` is the address that was registered at removal time, and
+  `timestamp` is the ledger timestamp of the removal — together they let a
+  consumer reconstruct the retired record without a follow-up read.
+- A **failed** `remove` (wrong caller, unknown username) publishes no event.
+
+`test_removed_event_payload_is_complete` asserts the full published event
+against a fully-specified `RemovedEvent`, plus the topic count and topic symbol
+independently, so renaming the event or dropping a field fails the build rather
+than silently breaking every subscriber's filter.
+`test_removed_event_not_published_on_failed_remove` covers the failure path.
 
 ### VerifiedEvent
 
 ```
-topics: ["VerifiedEvent", github_username]
+topics: ["verified_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
 ### VerificationRevokedEvent
 
 ```
-topics: ["VerificationRevokedEvent", github_username]
+topics: ["verification_revoked_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
 ### UpgradedEvent
 
 ```
-topics: ["UpgradedEvent", new_wasm_hash]
+topics: ["upgraded_event", new_wasm_hash]
 data:   { version, timestamp }
 ```
 
 ### PausedEvent / UnpausedEvent
 
 ```
-topics: ["PausedEvent" / "UnpausedEvent", admin]
+topics: ["paused_event" / "unpaused_event", admin]
 data:   { timestamp }
 ```
 
 ### RoleGrantedEvent / RoleRevokedEvent
 
 ```
-topics: ["RoleGrantedEvent" / "RoleRevokedEvent", address]
+topics: ["role_granted_event" / "role_revoked_event", address]
 data:   { role, admin, timestamp }
 ```
 
@@ -542,7 +746,8 @@ get_all_registered,100,...,...
 
 | Benchmark | Covers |
 |-----------|--------|
-| `test_bench_export_cpu_cost` | `get_all_registered` at registry sizes 1, 10, 50, 100 |
+| `test_bench_export_cpu_cost` | `get_all_registered` at registry sizes 10, 20, 40, 80 |
+| `test_bench_username_case_normalization` | `usernames_match` at 10, 50, 100, 200 comparisons (`make bench-username`) |
 | `test_bench_core_operation_cpu_cost` | `register`, `get_address`, `get_stats` |
 | `test_bench_failure_path_costs_less_than_success` | Rejected `verify` versus accepted `verify` |
 
@@ -553,8 +758,13 @@ asserts on shape rather than fixed numbers:
 
 - Export cost is **monotonic** in registry size. A drop means the export stopped
   visiting every record.
-- Export cost at size 100 stays within **3x the size ratio** of the size 1
-  baseline. This passes for a linear scan and fails for quadratic growth.
+- Export cost at the largest size stays within **3x the size ratio** of the
+  smallest-size baseline. This passes for a linear scan and fails for quadratic
+  growth.
+- Username case normalization is **monotonic** in comparison count and obeys the
+  same 3x linearity ceiling. Normalization runs on a fixed stack buffer, so a
+  regression that introduces per-comparison allocation or a nested scan fails
+  here.
 - A rejected call costs **strictly less** than the equivalent accepted call, so
   a missing-username lookup cannot become a cheap way to burn ledger budget.
 
@@ -567,6 +777,11 @@ asserts on shape rather than fixed numbers:
 - The measured section resets the budget to unlimited. This keeps cost tracking
   on while removing the ledger ceiling that a 100-entry export would otherwise
   trip mid-measurement.
+- `get_all_registered` reads one ledger entry per record, and Soroban rejects an
+  invocation whose footprint exceeds **100 ledger entries**. The export
+  benchmark therefore tops out below that ceiling; past roughly 100
+  contributors, `get_registered_page` / `get_registered_paginated` is the only
+  workable export path.
 - `get_all_registered` is admin-only and scans the full index. At large
   contributor counts, prefer event indexing (see
   [EVENT_INDEXING.md](EVENT_INDEXING.md)) over repeated full exports.
