@@ -171,6 +171,22 @@ stellar contract invoke --id $ID --source deployer --network testnet \
 
 ---
 
+### `check_vcount_invariant() -> bool`
+
+Exposes a diagnostic check that verified count exactly matches the number of verified records. Returns `true` if the invariant holds.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- check_vcount_invariant
+```
+
+---
+
 ## Events
 
 All events are defined with `#[contractevent]` and include a topic field for filtering.

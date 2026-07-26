@@ -168,6 +168,25 @@ impl TrustBridgeContract {
     pub fn get_stats(env: Env) -> Stats {
         read_stats(&env)
     }
+
+    /// Exposes a diagnostic check that verified count exactly matches the number of verified records.
+    /// Used by dashboard and indexer consumers.
+    pub fn check_vcount_invariant(env: Env) -> bool {
+        let stats = read_stats(&env);
+        let index = get_index(&env);
+        let mut actual_verified = 0;
+
+        for i in 0..index.len() {
+            let username = index.get(i).unwrap();
+            if let Some(record) = get_record(&env, &username) {
+                if record.verified {
+                    actual_verified += 1;
+                }
+            }
+        }
+
+        stats.verified == actual_verified && stats.total == index.len()
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +326,35 @@ mod test {
             let stats = TrustBridgeContract::get_stats(env.clone());
             assert_eq!(stats.total, 1);
             assert_eq!(stats.verified, 1);
+        });
+    }
+
+    #[test]
+    fn test_check_vcount_invariant() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            // Initially true
+            assert!(TrustBridgeContract::check_vcount_invariant(env.clone()));
+
+            // Register two users
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone())
+                .unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone())
+                .unwrap();
+
+            assert!(TrustBridgeContract::check_vcount_invariant(env.clone()));
+
+            // Verify one
+            TrustBridgeContract::verify(env.clone(), username(&env, "alice")).unwrap();
+            assert!(TrustBridgeContract::check_vcount_invariant(env.clone()));
+            
+            // Introduce a bug artificially by modifying storage count directly
+            crate::storage::set_verified_count(&env, 999);
+            assert!(!TrustBridgeContract::check_vcount_invariant(env.clone()));
         });
     }
 
