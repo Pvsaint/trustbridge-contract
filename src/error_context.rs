@@ -1,8 +1,11 @@
+// Helper module staged ahead of its call sites: the items below are part of the
+// contract's internal toolkit and are covered by this module's own tests, but
+// are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 /// Enhanced error context and handling for TrustBridge contract.
 ///
 /// This module provides more detailed error information and recovery hints
 /// that can be used for better diagnostics and user feedback.
-
 use crate::ContractError;
 
 /// Detailed error information with context and recovery suggestions.
@@ -87,6 +90,12 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::NotAuthorized => ErrorCategory::Permanent,
         ContractError::NotRegistered => ErrorCategory::Validation,
         ContractError::AlreadyVerified => ErrorCategory::Validation,
+        ContractError::NotVerified => ErrorCategory::Validation,
+        ContractError::Paused => ErrorCategory::Transient,
+        ContractError::CooldownActive => ErrorCategory::Transient,
+        ContractError::InvalidVersion => ErrorCategory::Validation,
+        ContractError::InvalidRole => ErrorCategory::Validation,
+        ContractError::InvalidUsername => ErrorCategory::Validation,
     }
 }
 

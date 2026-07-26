@@ -1,9 +1,12 @@
+// Helper module staged ahead of its call sites: the items below are part of the
+// contract's internal toolkit and are covered by this module's own tests, but
+// are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 /// Audit logging for tracking contract operations and admin actions.
 ///
 /// This module provides structured audit events for compliance and debugging,
 /// including admin actions, registrations, and verification events.
-
-use soroban_sdk::{String, Address, Env};
+use soroban_sdk::{Address, String};
 
 /// Types of audit events that can be recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,11 +55,7 @@ pub struct AuditLogEntry {
 
 impl AuditLogEntry {
     /// Create a new audit log entry.
-    pub fn new(
-        event_type: AuditEventType,
-        timestamp: u64,
-        actor: Option<Address>,
-    ) -> Self {
+    pub fn new(event_type: AuditEventType, timestamp: u64, actor: Option<Address>) -> Self {
         AuditLogEntry {
             event_type,
             timestamp,
@@ -147,7 +146,7 @@ impl AuditStats {
             AuditEventType::UserRemoved => self.removals += 1,
             AuditEventType::UserVerified => self.verifications += 1,
             AuditEventType::UnauthorizedAttempt => self.unauthorized_attempts += 1,
-            _ => {},
+            _ => {}
         }
     }
 }

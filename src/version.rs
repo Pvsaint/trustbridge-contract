@@ -1,7 +1,14 @@
-/// Contract versioning and compatibility tracking.
-///
-/// This module provides version management utilities for tracking contract
-/// upgrades, migrations, and maintaining backward compatibility.
+//! Contract versioning and compatibility tracking.
+//!
+//! This module provides version management utilities for tracking contract
+//! upgrades, migrations, and maintaining backward compatibility. The deployed
+//! version is written to instance storage by `initialize` and exposed through
+//! the `version` and `is_compatible` contract functions, which the generated
+//! TypeScript bindings package uses to guard against ABI drift.
+
+// Some items here are staged ahead of their call sites: they are covered by
+// this module's own tests but are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -14,7 +21,11 @@ pub struct Version {
 impl Version {
     /// Create a new version.
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Version { major, minor, patch }
+        Version {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse a version from a tuple (used for storage).
@@ -109,7 +120,9 @@ impl CompatibilityInfo {
         CompatibilityInfo {
             current_version: current,
             target_version: target,
-            migration_required: target.needs_migration(current),
+            // Direction matters: the deployed version is what may need to move
+            // to the target, not the other way round.
+            migration_required: current.needs_migration(target),
             breaking_changes,
             data_migration_required,
         }
@@ -119,6 +132,7 @@ impl CompatibilityInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
 
     #[test]
     fn test_version_comparison() {
@@ -144,7 +158,7 @@ mod tests {
     #[test]
     fn test_version_bumps() {
         let v1_2_3 = Version::new(1, 2, 3);
-        
+
         assert_eq!(v1_2_3.bump_patch(), Version::new(1, 2, 4));
         assert_eq!(v1_2_3.bump_minor(), Version::new(1, 3, 0));
         assert_eq!(v1_2_3.bump_major(), Version::new(2, 0, 0));
@@ -153,7 +167,63 @@ mod tests {
     #[test]
     fn test_version_display() {
         let v = Version::new(1, 2, 3);
-        assert_eq!(format!("{}", v), "1.2.3");
+        let s = alloc::format!("{}", v);
+        assert_eq!(s, "1.2.3");
+    }
+
+    #[test]
+    fn test_version_tuple_roundtrip() {
+        let v = Version::new(2, 7, 13);
+        assert_eq!(Version::from_tuple(v.to_tuple()), v);
+    }
+
+    #[test]
+    fn test_needs_migration() {
+        let current = Version::new(1, 0, 0);
+
+        assert!(current.needs_migration(Version::new(1, 1, 0)));
+        assert!(current.needs_migration(Version::new(2, 0, 0)));
+        // Same version is already migrated.
+        assert!(!current.needs_migration(current));
+        // Downgrades to an older major are not a migration path.
+        assert!(!Version::new(2, 0, 0).needs_migration(Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    fn test_compatibility_info_for_minor_upgrade() {
+        let info = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 1, 0));
+
+        assert!(info.migration_required);
+        assert!(!info.breaking_changes);
+        assert!(info.data_migration_required);
+        assert_eq!(info.current_version, Version::new(1, 0, 0));
+        assert_eq!(info.target_version, Version::new(1, 1, 0));
+    }
+
+    #[test]
+    fn test_compatibility_info_for_major_upgrade() {
+        let info = CompatibilityInfo::for_upgrade(Version::new(1, 4, 2), Version::new(2, 0, 0));
+
+        assert!(info.migration_required);
+        assert!(info.breaking_changes);
+        assert!(info.data_migration_required);
+    }
+
+    #[test]
+    fn test_compatibility_info_for_patch_upgrade() {
+        let info = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 0, 1));
+
+        assert!(info.migration_required);
+        assert!(!info.breaking_changes);
+        // A patch release keeps the storage layout, so no data migration.
+        assert!(!info.data_migration_required);
+    }
+
+    #[test]
+    fn test_migration_state_variants_are_distinct() {
+        assert_ne!(MigrationState::NotRequired, MigrationState::Pending);
+        assert_ne!(MigrationState::InProgress, MigrationState::Completed);
+        assert_ne!(MigrationState::Completed, MigrationState::Failed);
     }
 
     // ABI breaking-change CI gate (Contract Wave #38).
