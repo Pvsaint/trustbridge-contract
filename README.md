@@ -43,13 +43,19 @@ This contract provides that mapping **on-chain**:
 
 ## Features
 
-- `initialize` — one-time admin setup
+- `initialize` — one-time admin setup and initial role assignment
 - `register` — map GitHub username → Stellar address (requires address auth)
 - `get_address` — read-only lookup
 - `remove` — self-service or admin removal
 - `verify` — admin marks contributor as GitHub-verified
+- `revoke_verification` — admin revokes verified status
 - `get_all_registered` — admin-only full export for dashboard sync
 - `get_stats` — total and verified registration counts
+- `pause` / `unpause` / `is_paused` — emergency circuit breaker to pause mutating contract state
+- `set_role` / `remove_role` / `get_role` — Role-Based Access Control (`Admin`, `Upgrader`, `Verifier`)
+- `set_cooldown` / `get_cooldown` — WASM upgrade timelock cooldown period configuration
+- `upgrade` — admin/upgrader executable WASM code replacement
+- `migrate` / `get_version` — schema version migration harness and tracking
 
 See the full [ABI reference](docs/ABI.md) for argument types, return values, and events.
 
@@ -81,6 +87,11 @@ See the full [ABI reference](docs/ABI.md) for argument types, return values, and
 | `Symbol("count")` | Total registration count (`u32`) |
 | `Symbol("vcount")` | Verified registration count (`u32`) |
 | `Symbol("idx")` | Username index for admin export |
+| `Symbol("pause")` | Emergency pause boolean state (`bool`) |
+| `Symbol("cdown")` | WASM upgrade cooldown duration in seconds (`u64`) |
+| `Symbol("lastupg")` | Timestamp of last WASM upgrade (`u64`) |
+| `Symbol("ver")` | Contract schema version tuple (`(u32, u32, u32)`) |
+| `Symbol("role")` + `Address` | Assigned user role enum (`Role`) |
 
 ---
 
@@ -90,16 +101,18 @@ See the full [ABI reference](docs/ABI.md) for argument types, return values, and
 trustbridge-contract/
 ├── src/
 │   ├── lib.rs          # Contract implementation + unit tests
-│   ├── storage.rs      # Storage keys, types, helpers
-│   ├── events.rs       # RegisteredEvent, RemovedEvent, VerifiedEvent
-│   └── error.rs        # ContractError enum
-├── tests/              # (reserved for integration tests)
+│   ├── storage.rs      # Storage keys, Role enum, accessors
+│   ├── events.rs       # Contract event definitions (Registered, Verified, Upgraded, Paused, Role, etc.)
+│   └── error.rs        # ContractError enum (includes Paused, CooldownActive, etc.)
+├── tests/
+│   └── integration.rs  # End-to-end integration test suite & event tracking
 ├── scripts/
 │   └── deploy.sh       # Network-aware deploy + initialize script
 ├── docs/
 │   ├── ARCHITECTURE.md # Design, storage, auth, events
 │   ├── ABI.md          # Function & event reference
 │   ├── DEPLOYMENT.md   # Testnet/mainnet deployment guide
+│   ├── REGISTRY_INVARIANTS.md # Invariants and the property fuzzing suite
 │   └── CONTRIBUTING.md # How to contribute
 ├── .github/workflows/
 │   └── ci.yml          # fmt, clippy, test, contract build
@@ -137,9 +150,16 @@ cd trustbridge-contract
 
 ```bash
 make test          # Run unit tests
+make fuzz          # Run the invariant property fuzzing suite
+make bench         # Report CPU/memory cost per contract operation
 make build         # Build optimized WASM (via stellar contract build)
 make check         # fmt + clippy + test + build
 ```
+
+The fuzzing suite drives randomized `register` / `verify` / `revoke_verification` /
+`remove` sequences against an independent model of the registry and asserts the
+invariants in [docs/REGISTRY_INVARIANTS.md](docs/REGISTRY_INVARIANTS.md) after every
+step. Seeds are fixed constants, so failures replay deterministically.
 
 > **Note on WASM targets:** `soroban-sdk` 26.x requires the `wasm32v1-none` target. Building with `wasm32-unknown-unknown` on Rust 1.82+ is unsupported by the Soroban environment. The release profile uses `opt-level = "z"` and `lto = true` as specified in `Cargo.toml`.
 
@@ -232,11 +252,28 @@ More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
 | `remove(caller, github_username)` | `caller` (registrant or admin) | ✅ | Remove a registration |
 | `get_all_registered()` | Admin | ❌ | Export full registry |
 | `verify(github_username)` | Admin | ✅ | Mark as GitHub-verified |
+| `revoke_verification(github_username)` | Admin | ✅ | Clear a verification |
+| `get_verified_count()` | None | ❌ | Verified registration count |
 | `get_stats()` | None | ❌ | `{ total, verified }` |
+| `version()` | None | ❌ | Deployed version as `(major, minor, patch)` |
+| `is_compatible(major, minor, patch)` | None | ❌ | Client version handshake |
 
-**Events:** `RegisteredEvent`, `RemovedEvent`, `VerifiedEvent` — see [docs/ABI.md](docs/ABI.md)
+**Events:** `RegisteredEvent`, `RemovedEvent`, `VerifiedEvent`, `VerificationRevokedEvent` — see [docs/ABI.md](docs/ABI.md)
 
-**Errors:** `AlreadyInitialized`, `NotInitialized`, `NotAuthorized`, `NotRegistered`, `AlreadyVerified`
+**Errors:** `AlreadyInitialized`, `NotInitialized`, `NotAuthorized`, `NotRegistered`, `AlreadyVerified`, `NotVerified`, `InvalidUsername`
+
+> **Username validation:** `register` accepts 1 to 39 characters of alphanumerics, hyphens, and underscores, starting and ending alphanumeric. Anything else fails with `InvalidUsername` before auth is checked and before any write, so rejected calls leave the registry untouched. See [docs/SECURITY.md](docs/SECURITY.md#input-validation).
+
+### TypeScript bindings
+
+```bash
+make bindings CONTRACT_ID=$CONTRACT_ID NETWORK=testnet
+```
+
+Generates a typed client package into `bindings/typescript` (git-ignored) from
+the deployed WASM. Clients should call `is_compatible` at startup so a stale
+client fails fast instead of on an unexpected ABI. Full walkthrough:
+[docs/ABI.md](docs/ABI.md#typescript-bindings)
 
 > **`remove` and Soroban auth:** Soroban requires an explicit `caller` address argument so the contract can validate which identity signed the transaction. The caller must equal either the registered Stellar address or the contract admin.
 
