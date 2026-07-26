@@ -20,7 +20,7 @@ PKG_MANAGER  ?= pnpm
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-        invoke-register invoke-lookup invoke-init invoke-stats install-target
+        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'

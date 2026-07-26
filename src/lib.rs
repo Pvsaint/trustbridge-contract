@@ -469,6 +469,48 @@ impl TrustBridgeContract {
         Ok(())
     }
 
+    /// Extends the storage TTL of registry records so they are not archived.
+    ///
+    /// Soroban persistent entries expire unless their TTL is extended. Reads and
+    /// writes extend as a side effect, but a record nobody touches for ~30 days
+    /// is archived and becomes unreadable until restored — so a registry with a
+    /// long tail of inactive contributors silently loses its cold entries.
+    ///
+    /// This is the keeper operation that prevents that: an off-chain job walks
+    /// the index and calls this periodically for entries approaching expiry.
+    ///
+    /// Permissionless by design. Extending a TTL only ever preserves data —
+    /// there is no state an attacker could corrupt by calling it, and gating it
+    /// behind admin auth would mean the registry decays whenever the admin key
+    /// is unavailable. The caller pays the fee, which is its own rate limit.
+    ///
+    /// Returns the number of entries actually extended. Usernames that are not
+    /// registered are skipped rather than erroring: the keeper's list is built
+    /// off-chain and can lag behind removals.
+    pub fn extend_registry_ttl(
+        env: Env,
+        usernames: Vec<String>,
+    ) -> Result<u32, ContractError> {
+        require_initialized(&env)?;
+
+        // Bounded for the same reason as batch_verify: an unbounded Vec could
+        // exhaust the ledger's CPU budget and fail after partial work, leaving
+        // the keeper unable to tell which entries were extended.
+        let config = BatchConfig::default();
+        if !config.is_valid_batch_size(usernames.len()) {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        let mut extended: u32 = 0;
+        for username in usernames.iter() {
+            if extend_record_ttl(&env, &username) {
+                extended = extended.saturating_add(1);
+            }
+        }
+
+        Ok(extended)
+    }
+
     /// Read-only lookup. Returns `None` if the username is not registered.
     pub fn get_address(env: Env, github_username: String) -> Option<ContributorRecord> {
         if has_record(&env, &github_username) {
