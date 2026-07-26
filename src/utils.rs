@@ -5,16 +5,36 @@
 //! here works on a fixed stack buffer: the contract is `#![no_std]` and must
 //! not allocate on the validation path.
 
-use soroban_sdk::String;
+// Some helpers here are staged ahead of their call sites: they are covered by
+// this module's own tests but are not yet wired into `lib.rs`.
+#![allow(dead_code)]
+
+use soroban_sdk::{Env, String};
 
 /// GitHub caps usernames at 39 characters.
 pub const MAX_USERNAME_LEN: u32 = 39;
 
+/// Stack buffer size for username copies. Sized above `MAX_USERNAME_LEN`, so
+/// an over-long username is rejected on length before it is ever read.
+const USERNAME_BUF: usize = 64;
+
 /// Copies a username into a fixed stack buffer.
 ///
-/// This module provides helper functions for common contract operations,
-/// string manipulation, and validation.
-use soroban_sdk::{Env, String};
+/// Returns `None` when the username is empty or does not fit, which callers
+/// treat as a validation failure rather than truncating.
+fn copy_into_buf(s: &String, buf: &mut [u8; USERNAME_BUF]) -> Option<usize> {
+    let len = s.len() as usize;
+    if len == 0 || len > USERNAME_BUF {
+        return None;
+    }
+    s.copy_into_slice(&mut buf[..len]);
+    Some(len)
+}
+
+/// Check if a string is empty.
+pub fn is_empty(s: &String) -> bool {
+    s.is_empty()
+}
 
 /// Check if a string is empty or contains only whitespace.
 pub fn is_empty_or_whitespace(s: &String) -> bool {
@@ -35,23 +55,23 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
 /// GitHub itself but are accepted here so registrations made before validation
 /// existed remain readable and removable.
 pub fn is_valid_github_username(s: &String) -> bool {
-    let len = s.len() as usize;
-
-    // Length check: 1-39 characters
-    if len < 1 || len > 39 {
-        return false;
-    };
-    let bytes = &buf[..len];
-
-    let mut buf = [0u8; 64];
-    s.copy_into_slice(&mut buf[..len]);
-    let bytes = &buf[..len];
-
-    // First character must be alphanumeric
-    if !bytes[0].is_ascii_alphanumeric() {
+    if s.len() > MAX_USERNAME_LEN {
         return false;
     }
 
+    let mut buf = [0u8; USERNAME_BUF];
+    let len = match copy_into_buf(s, &mut buf) {
+        Some(len) => len,
+        None => return false,
+    };
+    let bytes = &buf[..len];
+
+    // First and last characters must be alphanumeric.
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[len - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+
+    // All characters must be alphanumeric, hyphen, or underscore.
     bytes
         .iter()
         .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
@@ -67,10 +87,19 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
         return false;
     }
 
-    // All characters must be alphanumeric, hyphen, or underscore
-    bytes
+    let mut buf_a = [0u8; USERNAME_BUF];
+    let mut buf_b = [0u8; USERNAME_BUF];
+    let (len_a, len_b) = match (copy_into_buf(a, &mut buf_a), copy_into_buf(b, &mut buf_b)) {
+        (Some(la), Some(lb)) => (la, lb),
+        // Equal lengths that failed to buffer means both are empty (equal) or
+        // both are too long to compare on the stack (reported unequal).
+        _ => return a.is_empty(),
+    };
+
+    buf_a[..len_a]
         .iter()
-        .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+        .zip(buf_b[..len_b].iter())
+        .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 /// Calculate the percentage of verified contributors out of total.
@@ -108,31 +137,33 @@ mod tests {
     #[test]
     fn test_is_empty_or_whitespace() {
         let env = Env::default();
-        let empty = String::from_str(&env, "");
-        let whitespace = String::from_str(&env, "   ");
-        let valid = String::from_str(&env, "hello");
 
-        assert!(is_empty_or_whitespace(&empty));
-        assert!(is_empty_or_whitespace(&whitespace));
-        assert!(!is_empty_or_whitespace(&valid));
+        assert!(is_empty_or_whitespace(&s(&env, "")));
+        assert!(is_empty_or_whitespace(&s(&env, "   ")));
+        assert!(!is_empty_or_whitespace(&s(&env, "hello")));
     }
 
     #[test]
     fn test_is_valid_github_username() {
         let env = Env::default();
-        let valid1 = String::from_str(&env, "alice");
-        let valid2 = String::from_str(&env, "bob-smith");
-        let valid3 = String::from_str(&env, "user_123");
-        let invalid1 = String::from_str(&env, "-invalid");
-        let invalid2 = String::from_str(&env, "invalid-");
-        let invalid3 = String::from_str(&env, "a@invalid");
 
-        assert!(is_valid_github_username(&valid1));
-        assert!(is_valid_github_username(&valid2));
-        assert!(is_valid_github_username(&valid3));
-        assert!(!is_valid_github_username(&invalid1));
-        assert!(!is_valid_github_username(&invalid2));
-        assert!(!is_valid_github_username(&invalid3));
+        assert!(is_valid_github_username(&s(&env, "alice")));
+        assert!(is_valid_github_username(&s(&env, "bob-smith")));
+        assert!(is_valid_github_username(&s(&env, "user_123")));
+        assert!(!is_valid_github_username(&s(&env, "-invalid")));
+        assert!(!is_valid_github_username(&s(&env, "invalid-")));
+        assert!(!is_valid_github_username(&s(&env, "a@invalid")));
+        assert!(!is_valid_github_username(&s(&env, "")));
+    }
+
+    #[test]
+    fn test_eq_ignore_ascii_case() {
+        let env = Env::default();
+
+        assert!(eq_ignore_ascii_case(&s(&env, "Alice"), &s(&env, "alice")));
+        assert!(eq_ignore_ascii_case(&s(&env, "BOB-1"), &s(&env, "bob-1")));
+        assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "bob")));
+        assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "alice1")));
     }
 
     #[test]
