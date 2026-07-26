@@ -6,6 +6,10 @@
 //! the `version` and `is_compatible` contract functions, which the generated
 //! TypeScript bindings package uses to guard against ABI drift.
 
+// Some items here are staged ahead of their call sites: they are covered by
+// this module's own tests but are not yet wired into `lib.rs`.
+#![allow(dead_code)]
+
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Version {
@@ -129,7 +133,6 @@ impl CompatibilityInfo {
 mod tests {
     use super::*;
     extern crate alloc;
-    use alloc::format;
 
     #[test]
     fn test_version_comparison() {
