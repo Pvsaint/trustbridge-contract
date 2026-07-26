@@ -86,9 +86,9 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Returns whether contract is currently paused.
-    pub fn is_paused(env: Env) -> bool {
-        storage_is_paused(&env)
+    /// Returns whether the given username has a pending reverify flag.
+    pub fn pending_reverify(env: Env, github_username: String) -> bool {
+        get_pending_reverify(&env, &github_username)
     }
 
     /// Assigns a role to an address. Admin-only.
@@ -454,6 +454,8 @@ impl TrustBridgeContract {
         } else if let Some(old) = existing {
             if old.stellar_address != stellar_address && old.verified {
                 set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+                // Mark pending reverify because address changed for a verified user
+                set_pending_reverify(&env, &github_username, true);
             }
         }
 
@@ -657,16 +659,8 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
-        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
-
-        if record.verified {
-            return Err(ContractError::AlreadyVerified);
-        }
-
-        record.verified = true;
-        set_record(&env, &github_username, &record);
-        set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
-
+        // Clear pending reverify flag upon successful verification
+        clear_pending_reverify(&env, &github_username);
         let timestamp = env.ledger().timestamp();
         VerifiedEvent {
             github_username: github_username.clone(),
