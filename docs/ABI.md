@@ -455,7 +455,92 @@ Returns contract version tuple `(major, minor, patch)`.
 
 ### `upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ContractError>`
 
-Upgrades the executable WASM bytecode of the contract. Subject to admin authentication and upgrade timelock cooldown.
+Upgrades the executable WASM bytecode of the contract. Subject to admin
+authentication and the upgrade timelock cooldown.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `CooldownActive`, `UnattestedWasm`, `AttestationExpired` |
+| **Events** | `UpgradedEvent` |
+
+Records a `WasmProvenance` entry for the new hash: what it replaced, who
+authorised it, when, at what version, and whether it had been attested. The
+record is written *before* the executable is swapped — afterwards the code
+answering the question is the new binary, and what it replaced would be lost.
+
+---
+
+### `attest_upgrade(wasm_hash: BytesN<32>, expires_at: u64) -> Result<(), ContractError>`
+
+Declare in advance the WASM hash you intend to deploy. Admin-only.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `AttestationExpired` (if `expires_at` is not in the future) |
+
+**Optional two-step upgrade.** While an attestation is live, `upgrade` accepts
+only the hash it names — so a compromised admin key cannot swap in a different
+binary at the moment of the upgrade without first publishing that intent
+on-chain, ahead of time, where watchers can see it.
+
+| Situation | `upgrade` behaviour |
+|---|---|
+| No attestation published | Proceeds as before — attestation is opt-in |
+| Attestation matches, unexpired | Proceeds; attestation is consumed; `attested: true` in provenance |
+| Attestation expired | Fails `AttestationExpired`; the stale record is cleared so a retry is not blocked |
+| Hash does not match | Fails `UnattestedWasm`; the attestation is **left in place**, since a mismatch may be an attacker substituting a binary and clearing it would let a second attempt through unchecked |
+
+Attestations are **single-use** — one upgrade, not a standing permission for
+that hash. `expires_at` is mandatory for the same reason: an attestation that
+never lapsed would be a standing authorisation, which is worse than none.
+
+Publishing a new attestation replaces any existing one.
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- attest_upgrade --wasm-hash <hex> --expires-at 1893456000
+```
+
+---
+
+### `clear_attestation() -> Result<(), ContractError>`
+
+Withdraw a pending attestation. Admin-only. The escape hatch for one published
+in error — without it the admin would have to wait out the expiry before
+upgrading to any other hash.
+
+---
+
+### `get_attestation() -> Option<WasmAttestation>`
+
+Returns the pending attestation, if any. Returned regardless of expiry, since
+seeing a lapsed attestation is what explains a rejected upgrade.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+---
+
+### `get_provenance() -> Option<WasmProvenance>`
+
+Returns the provenance of the currently deployed WASM. `None` on an instance
+that has never been upgraded.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_provenance
+```
 
 ---
 

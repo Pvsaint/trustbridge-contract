@@ -157,7 +157,85 @@ impl TrustBridgeContract {
         storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
     }
 
+    /// Declares in advance the WASM hash the admin intends to deploy. Admin-only.
+    ///
+    /// Optional two-step upgrade. While an attestation is live, `upgrade` will
+    /// accept only the hash it names — so a compromised admin key cannot swap
+    /// in a different binary at the moment of the upgrade without first
+    /// publishing that intent on-chain, ahead of time, where watchers can see
+    /// it.
+    ///
+    /// `expires_at` must be in the future. The expiry is the point: an
+    /// attestation that never lapsed would be a standing authorisation for that
+    /// hash, which is strictly worse than having none at all.
+    ///
+    /// Publishing a new attestation replaces any existing one.
+    pub fn attest_upgrade(
+        env: Env,
+        wasm_hash: BytesN<32>,
+        expires_at: u64,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            return Err(ContractError::AttestationExpired);
+        }
+
+        set_wasm_attestation(
+            &env,
+            &WasmAttestation {
+                wasm_hash,
+                expires_at,
+                attested_by: admin,
+                attested_at: now,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Withdraws a pending upgrade attestation. Admin-only.
+    ///
+    /// The escape hatch for an attestation published in error: without it the
+    /// admin would have to wait out the expiry before upgrading to any other
+    /// hash.
+    pub fn clear_attestation(env: Env) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        remove_wasm_attestation(&env);
+        Ok(())
+    }
+
+    /// Returns the pending upgrade attestation, if any.
+    ///
+    /// Returned regardless of expiry — seeing a lapsed attestation is useful
+    /// when diagnosing a rejected upgrade.
+    pub fn get_attestation(env: Env) -> Option<WasmAttestation> {
+        get_wasm_attestation(&env)
+    }
+
+    /// Returns the provenance of the currently deployed WASM.
+    ///
+    /// `None` on an instance that has never been upgraded. `previous_wasm_hash`
+    /// names the hash this one replaced, so the deployment lineage can be walked
+    /// backwards through historical `UpgradedEvent`s.
+    pub fn get_provenance(env: Env) -> Option<WasmProvenance> {
+        get_wasm_provenance(&env)
+    }
+
     /// Upgrades contract WASM executable code. Admin-only.
+    ///
+    /// Records provenance for the new hash: what it replaced, who authorised
+    /// it, when, at what version, and whether it had been attested. Previously
+    /// this wrote only a bare timestamp, so "what is deployed, and what did it
+    /// replace?" could not be answered from a contract call at all.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
@@ -166,15 +244,27 @@ impl TrustBridgeContract {
         admin.require_auth();
 
         let now = env.ledger().timestamp();
-        let cooldown = storage_get_cooldown(&env);
-        let has_upgraded = env.storage().instance().has(&crate::storage::LAST_UPG_KEY);
 
-        if has_upgraded && cooldown > 0 {
-            let last_upg = get_last_upgrade(&env);
-            if now < last_upg.saturating_add(cooldown) {
-                return Err(ContractError::CooldownActive);
-            }
-        }
+        Self::require_cooldown_elapsed(&env, now)?;
+        let attested = Self::consume_attestation(&env, &new_wasm_hash, now)?;
+
+        // Provenance is captured before the executable is swapped: after
+        // update_current_contract_wasm the code answering these questions is
+        // the new binary, and the record of what it replaced would be lost.
+        let previous_wasm_hash = get_wasm_provenance(&env).map(|p| p.wasm_hash);
+        let version = storage_get_version(&env);
+
+        set_wasm_provenance(
+            &env,
+            &WasmProvenance {
+                wasm_hash: new_wasm_hash.clone(),
+                previous_wasm_hash,
+                upgraded_by: admin,
+                upgraded_at: now,
+                version,
+                attested,
+            },
+        );
 
         env.deployer()
             .update_current_contract_wasm(new_wasm_hash.clone());
@@ -189,6 +279,69 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Enforces the upgrade timelock.
+    ///
+    /// Extracted from `upgrade` so the entry point reads as its four distinct
+    /// steps — timelock, attestation, provenance, swap — instead of one block
+    /// of interleaved policy.
+    fn require_cooldown_elapsed(env: &Env, now: u64) -> Result<(), ContractError> {
+        let cooldown = storage_get_cooldown(env);
+        if cooldown == 0 {
+            return Ok(());
+        }
+
+        // A contract that has never upgraded has no last-upgrade timestamp to
+        // measure from; treating the missing value as 0 would make the very
+        // first upgrade wait out a cooldown against the epoch.
+        if !env.storage().instance().has(&crate::storage::LAST_UPG_KEY) {
+            return Ok(());
+        }
+
+        if now < get_last_upgrade(env).saturating_add(cooldown) {
+            return Err(ContractError::CooldownActive);
+        }
+
+        Ok(())
+    }
+
+    /// Validates `new_wasm_hash` against any live attestation and clears it.
+    ///
+    /// Returns whether the upgrade was covered by an attestation, which is
+    /// recorded in the provenance so an auditor can tell a two-step upgrade
+    /// from a direct one after the fact.
+    fn consume_attestation(
+        env: &Env,
+        new_wasm_hash: &BytesN<32>,
+        now: u64,
+    ) -> Result<bool, ContractError> {
+        let attestation = match get_wasm_attestation(env) {
+            Some(a) => a,
+            // Attestation is opt-in: with none published, upgrade behaves as it
+            // always has. Making it mandatory would brick every deployment that
+            // upgrades without adopting the new flow.
+            None => return Ok(false),
+        };
+
+        if now > attestation.expires_at {
+            // Clear the stale record so the admin is not forced to call
+            // clear_attestation before retrying.
+            remove_wasm_attestation(env);
+            return Err(ContractError::AttestationExpired);
+        }
+
+        if attestation.wasm_hash != *new_wasm_hash {
+            // Deliberately left in place: a mismatch may be an attacker
+            // substituting a binary, and clearing it here would let a second
+            // attempt through unchecked.
+            return Err(ContractError::UnattestedWasm);
+        }
+
+        // Single-use — an attestation authorises one upgrade, not a standing
+        // permission for that hash.
+        remove_wasm_attestation(env);
+        Ok(true)
     }
 
     /// Migrates contract version state. Admin-only.

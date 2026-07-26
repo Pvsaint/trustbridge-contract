@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::ContractError;
 
@@ -78,6 +78,57 @@ pub struct ContributorRecord {
     pub stellar_address: Address,
     pub registered_at: u64,
     pub verified: bool,
+}
+
+/// Provenance of the currently deployed WASM executable (Wave #24).
+///
+/// `upgrade` previously left no queryable trace of what it did — it wrote a
+/// bare timestamp to `LAST_UPG_KEY` and published an event. Events are not
+/// contract state: an auditor asking "what is deployed right now, and what did
+/// it replace?" had to reconstruct the answer by replaying the whole event
+/// history, and could not do it from a contract call at all.
+///
+/// This is the answer as a single readable record. `previous_wasm_hash` is what
+/// makes it a chain rather than a snapshot: each record names its predecessor,
+/// so the lineage can be walked backwards through historical events even though
+/// only the head is stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct WasmProvenance {
+    /// Hash of the WASM currently executing.
+    pub wasm_hash: BytesN<32>,
+    /// Hash this one replaced. `None` for the first upgrade after deployment.
+    pub previous_wasm_hash: Option<BytesN<32>>,
+    /// Address that authorised the upgrade.
+    pub upgraded_by: Address,
+    /// Ledger timestamp the upgrade was applied.
+    pub upgraded_at: u64,
+    /// Contract version recorded at upgrade time.
+    pub version: (u32, u32, u32),
+    /// Whether the hash had been attested before it was applied.
+    pub attested: bool,
+}
+
+/// An admin's advance declaration of the WASM hash they intend to deploy.
+///
+/// Optional two-step upgrade. When an attestation is live, `upgrade` will only
+/// accept the hash it names — so a compromised admin key cannot swap in a
+/// different binary at the moment of the upgrade without first publishing that
+/// intent, on-chain, ahead of time.
+///
+/// The expiry is the point: an attestation that never lapsed would be a
+/// standing authorisation for that hash, which is strictly worse than none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct WasmAttestation {
+    /// Hash the admin has declared they intend to deploy.
+    pub wasm_hash: BytesN<32>,
+    /// Ledger timestamp after which this attestation is no longer valid.
+    pub expires_at: u64,
+    /// Address that published the attestation.
+    pub attested_by: Address,
+    /// Ledger timestamp the attestation was published.
+    pub attested_at: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -377,6 +428,34 @@ pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
     env.storage()
         .instance()
         .set(&COOLDOWN_KEY, &cooldown_seconds);
+}
+
+// ─── WASM provenance & attestation (Wave #24) ────────────────────────────────
+
+/// Provenance of the currently deployed WASM. `None` before the first upgrade.
+pub fn get_wasm_provenance(env: &Env) -> Option<WasmProvenance> {
+    env.storage().instance().get(&PROV_KEY)
+}
+
+pub fn set_wasm_provenance(env: &Env, provenance: &WasmProvenance) {
+    env.storage().instance().set(&PROV_KEY, provenance);
+}
+
+/// The pending upgrade attestation, if one has been published.
+///
+/// Returns the raw record regardless of expiry — callers decide what to do with
+/// a lapsed attestation, and `get_wasm_attestation` is also a read endpoint
+/// where seeing the expired value is useful for diagnosis.
+pub fn get_wasm_attestation(env: &Env) -> Option<WasmAttestation> {
+    env.storage().instance().get(&ATTEST_KEY)
+}
+
+pub fn set_wasm_attestation(env: &Env, attestation: &WasmAttestation) {
+    env.storage().instance().set(&ATTEST_KEY, attestation);
+}
+
+pub fn remove_wasm_attestation(env: &Env) {
+    env.storage().instance().remove(&ATTEST_KEY);
 }
 
 pub fn get_last_upgrade(env: &Env) -> u64 {
