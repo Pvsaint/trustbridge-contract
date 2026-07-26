@@ -15,21 +15,30 @@ pub use events::{
     UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{ContributorRecord, ExportPage, Role, Stats};
+pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use crate::storage::{
     add_to_index, get_admin, get_cooldown as storage_get_cooldown, get_count, get_index,
-    get_index_page, get_last_upgrade, get_record, get_role as storage_get_role,
-    get_registered_paginated_internal, get_stats as read_stats,
-    get_verified_count as storage_get_verified_count, get_version as storage_get_version,
-    has_record, has_role_or_admin, is_paused as storage_is_paused, remove_from_index,
-    remove_record, remove_role as storage_remove_role, require_initialized, require_not_paused,
-    set_cooldown as storage_set_cooldown, set_count, set_last_upgrade,
-    set_paused as storage_set_paused, set_record, set_role as storage_set_role, set_verified_count,
+    get_last_upgrade, get_record, get_registered_paginated_internal, get_role as storage_get_role,
+    get_stats as read_stats, get_verified_count as storage_get_verified_count,
+    get_version as storage_get_version, has_record, is_admin_caller, is_in_cooldown,
+    is_paused as storage_is_paused, remove_from_index, remove_record,
+    remove_role as storage_remove_role, require_initialized, require_not_paused,
+    set_cooldown as storage_set_cooldown, set_count, set_last_action, set_last_upgrade,
+    set_paused as set_paused_state, set_record, set_role as storage_set_role, set_verified_count,
     set_version, ADMIN_KEY,
 };
-use crate::version::{Version, CONTRACT_VERSION};
+use crate::utils::{eq_ignore_ascii_case, is_valid_github_username, MAX_USERNAME_LEN};
+
+/// Version this WASM was built at. Instances whose stored version predates
+/// version tracking fall back to this.
+pub const CONTRACT_VERSION: Version = Version {
+    major: 1,
+    minor: 0,
+    patch: 0,
+};
 
 #[contract]
 pub struct TrustBridgeContract;
@@ -45,7 +54,7 @@ impl TrustBridgeContract {
         env.storage().instance().set(&ADMIN_KEY, &admin);
         set_count(&env, 0);
         set_verified_count(&env, 0);
-        storage_set_paused(&env, false);
+        set_paused_state(&env, false);
         storage_set_cooldown(&env, 0);
         set_version(&env, (1, 0, 0));
         storage_set_role(&env, &admin, &Role::Admin);
@@ -59,7 +68,7 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        storage_set_paused(&env, true);
+        set_paused_state(&env, true);
         let timestamp = env.ledger().timestamp();
         PausedEvent { admin, timestamp }.publish(&env);
         Ok(())
@@ -71,7 +80,7 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        storage_set_paused(&env, false);
+        set_paused_state(&env, false);
         let timestamp = env.ledger().timestamp();
         UnpausedEvent { admin, timestamp }.publish(&env);
         Ok(())
@@ -204,7 +213,10 @@ impl TrustBridgeContract {
     /// Instances initialized before versioning was added carry no stored
     /// version and report the build constant instead.
     pub fn version(env: Env) -> (u32, u32, u32) {
-        storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
+        if require_initialized(&env).is_err() {
+            return CONTRACT_VERSION.to_tuple();
+        }
+        storage_get_version(&env)
     }
 
     /// Reports whether the deployed contract satisfies a client's minimum
@@ -215,11 +227,38 @@ impl TrustBridgeContract {
             .is_compatible_with(Version::new(major, minor, patch))
     }
 
+    /// Returns the maximum accepted GitHub username length.
+    ///
+    /// Clients read this instead of hardcoding 39, so a future relaxation of
+    /// the guard does not require a client release.
+    pub fn max_username_len(_env: Env) -> u32 {
+        MAX_USERNAME_LEN
+    }
+
+    /// Reports whether `github_username` would pass the `register` guard.
+    /// Lets a dashboard validate input before asking the user to sign.
+    pub fn is_username_valid(_env: Env, github_username: String) -> bool {
+        is_valid_github_username(&github_username)
+    }
+
+    /// Case-insensitive username equality, matching GitHub's own semantics.
+    ///
+    /// Off-chain verification workflows use this to match a registration
+    /// against a GitHub identity without depending on the stored casing.
+    pub fn usernames_match(_env: Env, a: String, b: String) -> bool {
+        eq_ignore_ascii_case(&a, &b)
+    }
+
     /// Registers or updates a GitHub username → Stellar address mapping.
     ///
     /// The caller must authenticate as `stellar_address`. The username must be
-    /// 1 to 39 characters of alphanumerics, hyphens, and underscores, starting
-    /// and ending alphanumeric, or the call fails with `InvalidUsername`.
+    /// 1 to `MAX_USERNAME_LEN` (39) characters of alphanumerics, hyphens, and
+    /// underscores, starting and ending alphanumeric, or the call fails with
+    /// `InvalidUsername`.
+    ///
+    /// Re-pointing an existing registration at a different address also
+    /// requires authentication from the address currently registered, so a
+    /// username cannot be taken over by whoever calls `register` next.
     pub fn register(
         env: Env,
         github_username: String,
@@ -227,10 +266,25 @@ impl TrustBridgeContract {
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
+
+        // Validate before auth: a malformed username is rejected at the
+        // cheapest point, before any signature check or storage read.
+        if !is_valid_github_username(&github_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
         stellar_address.require_auth();
 
         let timestamp = env.ledger().timestamp();
         let existing = get_record(&env, &github_username);
+
+        // Self-auth enforcement: transferring a username away from its current
+        // owner needs that owner's signature too.
+        if let Some(ref old) = existing {
+            if old.stellar_address != stellar_address {
+                old.stellar_address.require_auth();
+            }
+        }
 
         let record = ContributorRecord {
             stellar_address: stellar_address.clone(),
@@ -329,7 +383,7 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        let page = get_index_page(&env, offset, limit);
+        let page = crate::storage::get_index_page(&env, offset, limit);
         let mut result = Vec::new(&env);
         for i in 0..page.len() {
             let username = page.get(i).unwrap();
@@ -386,18 +440,18 @@ impl TrustBridgeContract {
         get_registered_paginated_internal(&env, cursor, limit)
     }
 
-    /// Marks a contributor as verified after an off-chain GitHub identity check.
-    ///
-    /// Callable by the contract admin **or** any address assigned the
-    /// `Role::Verifier` role (Issue #12 — verifier role separation).
-    ///
-    /// The `caller` argument must match an address that has either the admin
-    /// role or `Role::Verifier` assigned via `set_role`.
-    pub fn verify(
-        env: Env,
-        caller: Address,
-        github_username: String,
-    ) -> Result<(), ContractError> {
+    /// Toggles contract pause state. Admin-only (Issue #3).
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        set_paused_state(&env, paused);
+        Ok(())
+    }
+
+    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
+    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
@@ -478,13 +532,47 @@ impl TrustBridgeContract {
     pub fn get_stats(env: Env) -> Stats {
         read_stats(&env)
     }
+
+    // --- Reference event indexer hardening: admin/pause/roles/cooldown (Wave #33) ---
+
+    /// Returns whether the contract is currently paused.
+    ///
+    /// Alias of `is_paused` kept for the reference indexer, which reads this
+    /// name.
+    pub fn is_contract_paused(env: Env) -> bool {
+        storage_is_paused(&env)
+    }
+
+    /// Returns true if `caller` holds the admin role.
+    pub fn has_admin_role(env: Env, caller: Address) -> bool {
+        is_admin_caller(&env, &caller)
+    }
+
+    /// Records that `github_username` performed a registry-mutating action now,
+    /// for cooldown enforcement by callers.
+    pub fn record_action(env: Env, github_username: String) {
+        set_last_action(&env, &github_username, env.ledger().timestamp());
+    }
+
+    /// Returns true if `github_username` is still within the cooldown window.
+    pub fn is_registration_in_cooldown(env: Env, github_username: String) -> bool {
+        is_in_cooldown(&env, &github_username)
+    }
 }
 
 
 #[cfg(test)]
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _, Ledger as _},
+        Address, Env, Event as _, String, TryFromVal,
+    };
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1439,14 +1527,255 @@ mod test {
     }
 
     #[test]
-    fn test_migrate_requires_initialization() {
+    fn test_error_codes_match_repr() {
+        assert_eq!(ContractError::AlreadyInitialized.code(), 1);
+        assert_eq!(ContractError::NotInitialized.code(), 2);
+        assert_eq!(ContractError::NotAuthorized.code(), 3);
+        assert_eq!(ContractError::NotRegistered.code(), 4);
+        assert_eq!(ContractError::AlreadyVerified.code(), 5);
+        assert_eq!(ContractError::NotVerified.code(), 6);
+        assert_eq!(ContractError::Paused.code(), 7);
+        assert_eq!(ContractError::CooldownActive.code(), 8);
+        assert_eq!(ContractError::InvalidVersion.code(), 9);
+        assert_eq!(ContractError::InvalidRole.code(), 10);
+        assert_eq!(ContractError::InvalidUsername.code(), 11);
+    }
+
+    #[test]
+    fn test_error_from_code_is_inverse_of_code() {
+        for variant in [
+            ContractError::AlreadyInitialized,
+            ContractError::NotInitialized,
+            ContractError::NotAuthorized,
+            ContractError::NotRegistered,
+            ContractError::AlreadyVerified,
+            ContractError::NotVerified,
+            ContractError::Paused,
+            ContractError::CooldownActive,
+            ContractError::InvalidVersion,
+            ContractError::InvalidRole,
+            ContractError::InvalidUsername,
+        ] {
+            assert_eq!(ContractError::from_code(variant.code()), Some(variant));
+        }
+        assert_eq!(ContractError::from_code(0), None);
+        assert_eq!(ContractError::from_code(12), None);
+    }
+
+    // --- Issue #69: max username length guard ---
+
+    #[test]
+    fn test_register_rejects_over_length_username() {
         let env = Env::default();
-        let contract_id = env.register(TrustBridgeContract, ());
+        let (_admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
+
+        // 40 characters: one past MAX_USERNAME_LEN.
+        let too_long = String::from_str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(too_long.len(), MAX_USERNAME_LEN + 1);
+
         env.as_contract(&contract_id, || {
-            let result = TrustBridgeContract::migrate(env.clone(), (2, 0, 0));
-            assert_eq!(result, Err(ContractError::NotInitialized));
+            assert_eq!(
+                TrustBridgeContract::register(env.clone(), too_long.clone(), user.clone()),
+                Err(ContractError::InvalidUsername)
+            );
+            // The rejected username must leave no trace in the registry.
+            assert!(!TrustBridgeContract::has_record(env.clone(), too_long));
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
         });
+    }
+
+    #[test]
+    fn test_register_accepts_username_at_max_length() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        // Exactly 39 characters.
+        let at_max = String::from_str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(at_max.len(), MAX_USERNAME_LEN);
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                TrustBridgeContract::register(env.clone(), at_max.clone(), user.clone()).is_ok()
+            );
+            assert!(TrustBridgeContract::has_record(env.clone(), at_max));
+        });
+    }
+
+    #[test]
+    fn test_register_rejects_empty_and_malformed_usernames() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            for bad in ["", "-lead", "trail-", "has space", "at@sign"] {
+                assert_eq!(
+                    TrustBridgeContract::register(env.clone(), username(&env, bad), user.clone()),
+                    Err(ContractError::InvalidUsername),
+                    "expected {bad:?} to be rejected"
+                );
+            }
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+        });
+    }
+
+    #[test]
+    fn test_max_username_len_is_exposed() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::max_username_len(env.clone()), 39);
+            assert!(TrustBridgeContract::is_username_valid(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+            assert!(!TrustBridgeContract::is_username_valid(
+                env.clone(),
+                username(&env, "octo cat")
+            ));
+        });
+    }
+
+    // --- Issue #68: username case normalization ---
+
+    #[test]
+    fn test_usernames_match_is_case_insensitive() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::usernames_match(
+                env.clone(),
+                username(&env, "OctoCat"),
+                username(&env, "octocat")
+            ));
+            assert!(!TrustBridgeContract::usernames_match(
+                env.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat1")
+            ));
+        });
+    }
+
+    // --- Issue #72: register self-auth enforcement ---
+
+    #[test]
+    fn test_register_transfer_requires_current_owner_auth() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+
+        // Re-point the registration at `other`, authorizing only `other`.
+        // The current owner's signature is missing, so the call must fail.
+        env.set_auths(&[]);
+        let res = client.try_register(&name, &other);
+        assert!(
+            res.is_err(),
+            "takeover succeeded without the current owner's authorization"
+        );
+
+        // The registration is unchanged.
+        env.mock_all_auths();
+        assert_eq!(client.get_address(&name).unwrap().stellar_address, user);
+    }
+
+    #[test]
+    fn test_register_transfer_succeeds_with_both_auths() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+        client.register(&name, &other);
+
+        assert_eq!(client.get_address(&name).unwrap().stellar_address, other);
+        assert_eq!(client.get_stats().total, 1);
+    }
+
+    // --- Issue #64: RemovedEvent payload ---
+
+    #[test]
+    fn test_removed_event_payload_is_complete() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+
+        env.ledger().set_timestamp(1_700_000_000);
+        client.remove(&user, &name);
+
+        // `remove` must publish exactly one event, and that event must be a
+        // fully-populated RemovedEvent: the username as topic, and the removed
+        // address plus the removal timestamp as data. An indexer replaying only
+        // this event has to be able to reconstruct the record it is retiring,
+        // so every field is asserted rather than just the event's presence.
+        let expected = RemovedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 1_700_000_000,
+        };
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "RemovedEvent payload or topics changed"
+        );
+
+        // Pin the topic shape independently of the struct, so renaming the
+        // event or dropping the username topic breaks this test rather than
+        // silently breaking every downstream subscriber's filter.
+        let topics = expected.topics(&env);
+        assert_eq!(topics.len(), 2, "RemovedEvent must have 2 topics");
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            soroban_sdk::Symbol::new(&env, "removed_event"),
+            "RemovedEvent topic symbol changed"
+        );
+        assert_eq!(
+            String::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            name,
+            "RemovedEvent username topic changed"
+        );
+    }
+
+    #[test]
+    fn test_removed_event_not_published_on_failed_remove() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+
+        // A caller who is neither the registrant nor the admin is rejected,
+        // and must not leave a RemovedEvent behind for indexers to act on.
+        assert!(client.try_remove(&other, &name).is_err());
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "failed remove published an event"
+        );
+        assert!(client.has_record(&name));
     }
 
     // ── Pause / unpause workflow ──────────────────────────────────────────────
@@ -1808,7 +2137,146 @@ mod test {
         });
     }
 
-    // ── Issue #12: Additional verifier role separation tests ─────────────────
+    /// Comparison counts the case-normalization benchmark sweeps. Normalization
+    /// touches no ledger entries, so it is not footprint-bound.
+    const BENCH_SIZES: [u32; 4] = [10, 50, 100, 200];
+
+    /// Registry sizes the full-export benchmark sweeps.
+    ///
+    /// Capped below 100: `get_all_registered` reads one ledger entry per
+    /// record, and Soroban rejects an invocation whose footprint exceeds 100
+    /// entries. That ceiling is the reason `get_registered_page` exists — see
+    /// `test_bench_export_footprint_ceiling`.
+    const EXPORT_BENCH_SIZES: [u32; 4] = [10, 20, 40, 80];
+
+    /// Registers `size` contributors and measures the metered cost of a single
+    /// full export. Returns `(cpu_instructions, memory_bytes)`.
+    fn measure_export(size: u32) -> (u64, u64) {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        // Each registration runs in its own frame: `require_auth` for the same
+        // address twice in one frame is an Auth(ExistingValue) error.
+        for i in 0..size {
+            let mut name = alloc::string::String::from("bench");
+            name.push_str(&alloc::format!("{i}"));
+            let name = String::from_str(&env, &name);
+            env.as_contract(&contract_id, || {
+                TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+            });
+        }
+
+        env.cost_estimate().budget().reset_default();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+        });
+
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    /// Measures the metered cost of `size` case-insensitive username
+    /// comparisons — the normalization step an off-chain verifier performs per
+    /// candidate match. Returns `(cpu_instructions, memory_bytes)`.
+    fn measure_case_normalization(size: u32) -> (u64, u64) {
+        let env = Env::default();
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        // Mixed-case on one side, lower-case on the other, so every comparison
+        // exercises the folding path rather than an early length mismatch.
+        let upper = String::from_str(&env, "OctoCat-Dev_01");
+        let lower = String::from_str(&env, "octocat-dev_01");
+
+        env.cost_estimate().budget().reset_default();
+        env.as_contract(&contract_id, || {
+            for _ in 0..size {
+                assert!(TrustBridgeContract::usernames_match(
+                    env.clone(),
+                    upper.clone(),
+                    lower.clone()
+                ));
+            }
+        });
+
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    /// Benchmark for issue #68: username case normalization must stay linear
+    /// in the number of comparisons and must not allocate per comparison.
+    #[test]
+    fn test_bench_username_case_normalization() {
+        std::println!("operation,size,cpu_instructions,memory_bytes");
+
+        let mut previous_cpu = 0u64;
+        let mut baseline: Option<(u32, u64)> = None;
+        let mut largest: Option<(u32, u64)> = None;
+
+        for size in BENCH_SIZES {
+            let (cpu, mem) = measure_case_normalization(size);
+            std::println!("usernames_match,{},{},{}", size, cpu, mem);
+
+            assert!(cpu > 0, "normalization at size {size} was not metered");
+            assert!(
+                cpu >= previous_cpu,
+                "normalization CPU cost dropped at size {size}: {cpu} < {previous_cpu}"
+            );
+
+            previous_cpu = cpu;
+            baseline.get_or_insert((size, cpu));
+            largest = Some((size, cpu));
+        }
+
+        let (small_size, small_cpu) = baseline.unwrap();
+        let (large_size, large_cpu) = largest.unwrap();
+
+        // Comparison is a fixed-width stack scan, so cost is linear in the
+        // number of calls. 3x headroom over the size ratio absorbs per-call
+        // overhead while still failing on super-linear growth.
+        let ceiling = small_cpu * ((large_size / small_size) as u64) * 3;
+        assert!(
+            large_cpu <= ceiling,
+            "normalization CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
+        );
+    }
+
+    #[test]
+    fn test_bench_export_cpu_cost() {
+        std::println!("operation,size,cpu_instructions,memory_bytes");
+
+        let mut previous_cpu = 0u64;
+        let mut baseline: Option<(u32, u64)> = None;
+        let mut largest: Option<(u32, u64)> = None;
+
+        for size in EXPORT_BENCH_SIZES {
+            let (cpu, mem) = measure_export(size);
+            std::println!("get_all_registered,{},{},{}", size, cpu, mem);
+
+            assert!(cpu > 0, "export at size {size} was not metered");
+            // Cost is monotonic in registry size; a drop means the export
+            // stopped visiting every record.
+            assert!(
+                cpu >= previous_cpu,
+                "export CPU cost dropped at size {size}: {cpu} < {previous_cpu}"
+            );
+
+            previous_cpu = cpu;
+            baseline.get_or_insert((size, cpu));
+            largest = Some((size, cpu));
+        }
+
+        let (small_size, small_cpu) = baseline.unwrap();
+        let (large_size, large_cpu) = largest.unwrap();
+
+        // Export is a linear scan. Allow 3x headroom over the size ratio so
+        // normal per-entry overhead passes while quadratic growth fails.
+        let ceiling = small_cpu * ((large_size / small_size) as u64) * 3;
+        assert!(
+            large_cpu <= ceiling,
+            "export CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
+        );
+    }
 
     /// Revoking Verifier role prevents further verify calls (Issue #12).
     #[test]

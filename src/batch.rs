@@ -1,3 +1,7 @@
+// Helper module staged ahead of its call sites: the items below are part of the
+// contract's internal toolkit and are covered by this module's own tests, but
+// are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 /// Batch operation utilities for efficient contract interactions.
 ///
 /// This module provides helpers for performing multiple operations efficiently,

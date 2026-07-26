@@ -14,6 +14,24 @@ pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
+pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
+pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chunkcnt");
+pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
+
+/// Entries per index chunk. Keeps a single chunk read well under the ledger
+/// entry size limit while still amortising reads across pages.
+pub const CHUNK_SIZE: u32 = 100;
+
+/// Page size used when a caller passes `limit = 0`.
+pub const DEFAULT_PAGE_LIMIT: u32 = 50;
+/// Upper bound on a single export page, to keep the response under the
+/// transaction result size limit.
+pub const MAX_PAGE_LIMIT: u32 = 200;
+
+/// Persistent entries are bumped when their remaining TTL drops below this.
+pub const TTL_THRESHOLD: u32 = 100_000;
+/// Ledgers of TTL to restore on bump (~60 days at 5s ledgers).
+pub const TTL_BUMP: u32 = 1_000_000;
 
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
@@ -96,40 +114,6 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
         .ok_or(ContractError::NotInitialized)
 }
 
-/// Returns true if `address` is the contract admin.
-pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
-    match get_admin(env) {
-        Ok(admin) => admin == *address,
-        Err(_) => false,
-    }
-}
-
-// ── Pause state ──────────────────────────────────────────────────────────────
-
-pub fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-}
-
-pub fn set_paused(env: &Env, paused: bool) {
-    env.storage().instance().set(&PAUSED_KEY, &paused);
-}
-
-/// Alias kept for backwards-compat with callers using the old name.
-#[inline]
-pub fn set_paused_state(env: &Env, paused: bool) {
-    set_paused(env, paused);
-}
-
-pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused(env) {
-        Err(ContractError::Paused)
-    } else {
-        Ok(())
-    }
-}
-
-// ── Per-user records ─────────────────────────────────────────────────────────
-
 pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
     let key = (REG_KEY, github_username.clone());
     let record: Option<ContributorRecord> = env.storage().persistent().get(&key);
@@ -175,20 +159,6 @@ pub fn get_verified_count(env: &Env) -> u32 {
 pub fn set_verified_count(env: &Env, count: u32) {
     env.storage().instance().set(&VCOUNT_KEY, &count);
 }
-
-// ── Version ───────────────────────────────────────────────────────────────────
-
-/// Returns the version recorded at initialize time, or `None` for instances
-/// deployed before version tracking existed.
-pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
-    env.storage().instance().get(&VERSION_KEY)
-}
-
-pub fn set_version(env: &Env, version: (u32, u32, u32)) {
-    env.storage().instance().set(&VERSION_KEY, &version);
-}
-
-// ── Legacy flat index ────────────────────────────────────────────────────────
 
 pub fn get_index(env: &Env) -> Vec<String> {
     env.storage()
@@ -308,7 +278,30 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
     }
 }
 
-// ── Paginated export ─────────────────────────────────────────────────────────
+/// Returns a slice of the username index: up to `limit` entries starting at
+/// `offset`. Out-of-range offsets yield an empty page rather than an error.
+pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
+    let index = get_index(env);
+    let mut page = Vec::new(env);
+
+    let effective_limit = if limit == 0 {
+        DEFAULT_PAGE_LIMIT
+    } else {
+        limit.min(MAX_PAGE_LIMIT)
+    };
+
+    if offset >= index.len() {
+        return page;
+    }
+
+    let end = offset.saturating_add(effective_limit).min(index.len());
+    for i in offset..end {
+        if let Some(username) = index.get(i) {
+            page.push_back(username);
+        }
+    }
+    page
+}
 
 // Paginated export implementation (Issue #1 & #3)
 pub fn get_registered_paginated_internal(
@@ -444,6 +437,45 @@ pub fn remove_role(env: &Env, address: &Address) {
         .remove(&(ROLE_KEY, address.clone()));
 }
 
+/// True when `address` is the contract admin.
+pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
+    matches!(get_admin(env), Ok(admin) if admin == *address)
+}
+
+/// Timestamp of `github_username`'s last cooldown-tracked action, or 0 if it
+/// has none. Cooldown is tracked per username rather than globally so one
+/// contributor's activity cannot block everyone else's.
+pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&(LAST_ACT_KEY, github_username.clone()))
+        .unwrap_or(0)
+}
+
+pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
+    let key = (LAST_ACT_KEY, github_username.clone());
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+/// True when the configured cooldown has not yet elapsed since
+/// `github_username`'s last tracked action. A cooldown of 0 disables the
+/// check entirely.
+pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
+    let cooldown = get_cooldown(env);
+    if cooldown == 0 {
+        return false;
+    }
+    let last = get_last_action(env, github_username);
+    if last == 0 {
+        return false;
+    }
+    env.ledger().timestamp() < last.saturating_add(cooldown)
+}
+
+#[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.
 pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
     if let Ok(admin) = get_admin(env) {
         if *address == admin {

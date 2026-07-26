@@ -6,13 +6,9 @@
 //! the `version` and `is_compatible` contract functions, which the generated
 //! TypeScript bindings package uses to guard against ABI drift.
 
-/// The build-time contract version constant. Reported by `version()` on
-/// instances deployed before on-chain version tracking was added.
-pub const CONTRACT_VERSION: Version = Version {
-    major: 1,
-    minor: 0,
-    patch: 0,
-};
+// Some items here are staged ahead of their call sites: they are covered by
+// this module's own tests but are not yet wired into `lib.rs`.
+#![allow(dead_code)]
 
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -137,7 +133,6 @@ impl CompatibilityInfo {
 mod tests {
     use super::*;
     extern crate alloc;
-    use alloc::format;
 
     #[test]
     fn test_version_comparison() {
