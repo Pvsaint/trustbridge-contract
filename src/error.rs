@@ -54,7 +54,7 @@ impl ContractError {
 // |------|----------------------|-------------------------------------|
 // | 1    | AlreadyInitialized   | initialize                         |
 // | 2    | NotInitialized       | register, remove, get_all_registered, verify, revoke_verification |
-// | 3    | NotAuthorized        | remove                             |
+// | 3    | NotAuthorized        | remove, verify, revoke_verification |
 // | 4    | NotRegistered        | remove, verify, revoke_verification |
 // | 5    | AlreadyVerified      | verify                             |
 // | 6    | NotVerified          | revoke_verification                |
@@ -68,5 +68,5 @@ impl ContractError {
 // consumers decoding a raw error code back into a typed variant.
 //
 // Tests covering this mapping live in `src/lib.rs`
-// (`test_contract_error_code_mapping`, `test_remove_missing_registration_maps_to_not_registered`,
-// `test_contract_error_from_code_is_inverse_of_code`).
+// (`test_error_codes_match_repr`, `test_from_code_round_trips_all_variants`,
+// `test_from_code_unknown_returns_none`).

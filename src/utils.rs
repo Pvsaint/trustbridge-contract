@@ -36,7 +36,7 @@ pub fn is_empty(s: &String) -> bool {
     s.is_empty()
 }
 
-/// Check if a string is empty or contains only whitespace.
+/// Check if a string is empty or contains only ASCII whitespace.
 pub fn is_empty_or_whitespace(s: &String) -> bool {
     let len = s.len() as usize;
     if len == 0 {
@@ -128,7 +128,6 @@ mod tests {
     #[test]
     fn test_is_empty() {
         let env = Env::default();
-
         assert!(is_empty(&s(&env, "")));
         assert!(!is_empty(&s(&env, " ")));
         assert!(!is_empty(&s(&env, "alice")));
@@ -177,7 +176,6 @@ mod tests {
 
     #[test]
     fn test_percentage_does_not_overflow_at_u32_max() {
-        // The u64 widening is what keeps this from wrapping.
         assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
     }
 }

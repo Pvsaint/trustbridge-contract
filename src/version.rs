@@ -167,7 +167,8 @@ mod tests {
     #[test]
     fn test_version_display() {
         let v = Version::new(1, 2, 3);
-        assert_eq!(std::format!("{}", v), "1.2.3");
+        let s = alloc::format!("{}", v);
+        assert_eq!(s, "1.2.3");
     }
 
     #[test]
