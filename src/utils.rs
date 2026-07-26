@@ -42,18 +42,32 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
     if len == 0 {
         return true;
     }
-    let mut buf = [0u8; 128];
-    let slice_len = len.min(128);
-    s.copy_into_slice(&mut buf[..slice_len]);
-    buf[..slice_len].iter().all(|b| b.is_ascii_whitespace())
+    if len > USERNAME_BUF_LEN {
+        // Too long to inspect on the stack, but definitively not whitespace-only
+        // for any input this contract accepts.
+        return false;
+    }
+    let mut buf = [0u8; USERNAME_BUF_LEN];
+    s.copy_into_slice(&mut buf[..len]);
+    buf[..len].iter().all(|b| b.is_ascii_whitespace())
 }
 
-/// Validate that a GitHub username follows basic rules.
+/// Validate that a GitHub username follows GitHub's own rules.
 ///
-/// Accepts 1 to 39 characters of alphanumerics, hyphens, and underscores, with
-/// an alphanumeric first and last character. Underscores are not valid on
-/// GitHub itself but are accepted here so registrations made before validation
-/// existed remain readable and removable.
+/// Accepted:
+/// - 1 to 39 characters (`MAX_USERNAME_LEN`)
+/// - ASCII alphanumerics, hyphens, and underscores only
+/// - first and last character alphanumeric
+/// - no consecutive hyphens
+///
+/// Underscores are not valid on GitHub itself but are accepted here so that
+/// registrations made before validation existed remain readable and removable.
+/// Rejecting them would strand those records: `remove` looks the username up by
+/// exact key, so a name that cannot be expressed can never be cleaned up.
+///
+/// The comparison is byte-wise ASCII. `String::len()` returns a byte count, so
+/// any multi-byte UTF-8 sequence fails the alphanumeric check on its leading
+/// byte and is rejected — which is correct, since GitHub usernames are ASCII.
 pub fn is_valid_github_username(s: &String) -> bool {
     if s.len() > MAX_USERNAME_LEN {
         return false;
@@ -81,11 +95,24 @@ pub fn is_valid_github_username(s: &String) -> bool {
 ///
 /// GitHub usernames are case-insensitive, so this is what an off-chain
 /// verification workflow should use when matching a registration against a
-/// GitHub identity.
+/// GitHub identity. Note that storage keys are still case-*sensitive*: this
+/// compares two values, it does not normalise them.
 pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
-    if a.len() != b.len() {
+    let len = a.len() as usize;
+    if len != b.len() as usize {
         return false;
     }
+    if len == 0 {
+        return true;
+    }
+    if len > USERNAME_BUF_LEN {
+        return false;
+    }
+
+    let mut buf_a = [0u8; USERNAME_BUF_LEN];
+    let mut buf_b = [0u8; USERNAME_BUF_LEN];
+    a.copy_into_slice(&mut buf_a[..len]);
+    b.copy_into_slice(&mut buf_b[..len]);
 
     let mut buf_a = [0u8; USERNAME_BUF];
     let mut buf_b = [0u8; USERNAME_BUF];
@@ -143,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_github_username() {
+    fn test_accepts_valid_usernames() {
         let env = Env::default();
 
         assert!(is_valid_github_username(&s(&env, "alice")));
