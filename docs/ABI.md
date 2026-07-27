@@ -786,6 +786,40 @@ asserts on shape rather than fixed numbers:
   contributor counts, prefer event indexing (see
   [EVENT_INDEXING.md](EVENT_INDEXING.md)) over repeated full exports.
 
+### Simulate-register gas reporting
+
+In addition to the in-process benchmark suite, operators can simulate real network
+resource consumption using `stellar contract invoke` **without** submitting a transaction
+or spending funds.  This is the recommended way to set Wave invoke budgets.
+
+```bash
+make simulate-register CONTRACT_ID=$CONTRACT_ID STELLAR_ADDR=$STELLAR_ADDR
+# or directly:
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  -- register \
+  --github-username octocat \
+  --stellar-address $STELLAR_ADDR
+```
+
+Omitting `--send=yes` triggers simulation mode.  The CLI prints resource fields
+including `cpu_instructions`, `mem_bytes`, and `min_resource_fee` (in stroops).
+
+Compare baseline (short username) vs. max-length (39 chars) to see the
+username-length delta (Issue #111 — `#77` cross-reference):
+
+```bash
+make simulate-register-compare CONTRACT_ID=$CONTRACT_ID STELLAR_ADDR=$STELLAR_ADDR
+# Writes both results to simulate-register-results.txt for diffing
+```
+
+**Limitations:** simulation fees are approximations — actual fees may differ under
+ledger load, after protocol upgrades, or if the simulated footprint differs from the
+live footprint.  See [DEPLOYMENT.md#simulate-register-gas-reporting](DEPLOYMENT.md#simulate-register-gas-reporting)
+for a full field-by-field interpretation guide and caveats.
+
 ---
 
 ## CLI Tips
