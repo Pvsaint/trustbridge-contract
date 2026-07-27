@@ -27,6 +27,21 @@ struct Stats {
 }
 ```
 
+### ExportPage
+
+Returned by `get_registered_paginated` and `get_public_paginated`. Unlike
+`get_all_registered`, each entry is a full `ContributorRecord` — so `verified`
+is available directly, with no second call needed (Issue #96).
+
+```rust
+struct ExportPage {
+    records: Vec<(String, ContributorRecord)>,
+    next_cursor: Option<u32>,
+    total: u32,
+    has_more: bool,
+}
+```
+
 ### BatchSummary
 
 Returned by `batch_verify`. `success_rate` is an integer percentage.
@@ -84,6 +99,14 @@ One-time setup. Stores the admin address and zeroes counters.
 | **Auth** | None (protect at deployment time) |
 | **Mutates** | Yes |
 | **Errors** | `AlreadyInitialized` |
+
+**Admin immutability (Issue #97).** The admin address set here cannot be
+overwritten or silently replaced afterward: `initialize` is the only entry
+point that writes it, and a second call always fails with
+`AlreadyInitialized`, regardless of which admin address it names. No other
+function in this ABI mutates the admin. There is no on-chain admin-transfer
+API — rotating the admin means deploying a new contract instance. See
+[SECURITY.md § Admin Key Management](SECURITY.md#admin-key-management).
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
@@ -162,6 +185,12 @@ removable.
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
   -- register --github-username octocat --stellar-address G...
 ```
+
+**Multi-user register sequence (Issue #94).** For a reference fixture of
+`register` called for several users in sequence — expected `RegisteredEvent`
+order and `get_stats()` progression after each step — see
+`test_issue_94_multi_user_register_sequence` in `src/lib.rs` and
+[DASHBOARD_SYNC.md § Multi-user register sequence](DASHBOARD_SYNC.md#multi-user-register-sequence-issue-94).
 
 ---
 
@@ -266,6 +295,69 @@ stellar contract invoke --id $ID --source admin --network testnet \
   -- get_all_registered
 ```
 
+**No `verified` flag.** Entries are `(String, Address)` pairs only — there is
+no per-user verification status here. Consumers that need username, address,
+and verified together should use `get_registered_paginated` (admin) or
+`get_public_paginated` (public) instead, both documented below (Issue #96).
+
+---
+
+### `get_registered_page(offset: u32, limit: u32) -> Result<Vec<(String, Address)>, ContractError>`
+
+Admin-gated page of `(github_username, stellar_address)` pairs, for large
+registries where `get_all_registered` would exceed the per-invocation
+footprint limit. Same shape as `get_all_registered` — no `verified` flag; use
+`get_registered_paginated` for that.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+
+---
+
+### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Admin-gated paginated export. Each entry is a full `ContributorRecord`, so the
+`verified` bit travels with every row — no second call or cross-reference
+against `get_address` is needed to know verification status (Issue #96).
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+
+`limit = 0` defaults to `DEFAULT_PAGE_LIMIT` (20); any value above
+`MAX_PAGE_LIMIT` (100) is clamped down to it. `next_cursor` is `Some` while
+`has_more` is true; pass it back as `cursor` to continue.
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor 0 --limit 50
+```
+
+---
+
+### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Same `ExportPage` shape as `get_registered_paginated` — including the
+`verified` flag per record — but callable by anyone. This is the
+unauthenticated read path for dashboards and indexers that need
+username + address + verified without an admin key (Issue #96).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `Paused` |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_public_paginated --cursor 0 --limit 50
+```
+
 ---
 
 ### `verify(github_username: String) -> Result<(), ContractError>`
@@ -364,6 +456,17 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
   -- revoke_verification --caller G... --github-username octocat
 ```
+
+**Verify → revoke → verify cycle (Issue #95).** `verify` and
+`revoke_verification` can be applied to the same username repeatedly without
+corrupting counters or storage: revoking decrements `verified`, and a
+subsequent `verify` succeeds and publishes a fresh `VerifiedEvent`. Only the
+`verified` flag and the `verified` counter change across the cycle — the
+record's `stellar_address` and `registered_at` are untouched. A `verify` call
+with no intervening `revoke_verification` still fails `AlreadyVerified`, even
+after the record has already been through one full cycle. Covered by
+`test_issue_95_verify_revoke_verify_cycle` and
+`test_issue_95_double_verify_without_revoke_fails_mid_cycle` in `src/lib.rs`.
 
 ---
 

@@ -16,6 +16,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Unauthorized removal | `caller` must auth as registrant or admin |
 | Unauthorized admin actions | `admin.require_auth()` on `verify` and `get_all_registered` |
 | Double initialization | `AlreadyInitialized` error |
+| Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
@@ -33,7 +34,24 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 
 ## Admin Key Management
 
-The admin address is **immutable** after `initialize`. Recommendations:
+The admin address is **immutable** after `initialize` (Issue #97). `initialize`
+is the only entry point that writes the `ADMIN_KEY` storage slot, and it does
+so exactly once: a second call fails with `AlreadyInitialized` regardless of
+which admin address it names. No other public function in the ABI — `pause`,
+`set_role`, `set_cooldown`, `migrate`, `upgrade`, etc. — mutates `ADMIN_KEY`.
+There is deliberately no admin-transfer API (see Notes on Issue #97); rotation
+means redeploying a new instance.
+
+Regression coverage in `src/lib.rs`:
+
+- `test_double_initialize_rejected_after_successful_init`,
+  `test_issue_97_second_initialize_rejected_with_different_admin` — a second
+  `initialize` always fails, even with a different admin address.
+- `test_issue_97_admin_unchanged_across_unrelated_operations` — the original
+  admin remains the only recognized admin across pause/unpause, role grants,
+  cooldown changes, verify, and migration.
+
+Recommendations:
 
 - Use a **multisig** or **smart account** as the admin G-address
 - Never commit private keys or seed phrases
