@@ -611,3 +611,32 @@ pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> b
         None => false,
     }
 }
+
+// ── Index-length invariant (Issue #59 / Wave #60) ────────────────────────────
+//
+// The registry maintains two parallel counters:
+//   1. `COUNT_KEY`  — the u32 stored by `set_count` / read by `get_count`.
+//   2. `INDEX_KEY`  — the Vec<String> stored by `set_index` / read by `get_index`.
+//
+// Both must be updated atomically inside every `register` and `remove` call.
+// If either update is skipped — e.g. the index is extended but the counter is
+// not, or the counter is decremented but the username is not removed from the
+// index — the invariant breaks and callers that rely on one for bounds-checking
+// will diverge from callers that read the other.
+//
+// `index_length_invariant_holds` captures this in a single readable boolean so
+// test code and any future on-chain self-check can express the invariant
+// without repeating its definition.
+
+/// Returns `true` when the flat username index length equals the stored
+/// registration count.
+///
+/// This is the index-length invariant: `get_count(env) == get_index(env).len()`.
+/// Both sides are updated inside every `register` and `remove` call, and they
+/// must stay equal at every quiescent point (between transactions).
+///
+/// Used by the test suite to assert the invariant holds after every
+/// state-mutating operation, and by audit tooling to spot-check live state.
+pub fn index_length_invariant_holds(env: &Env) -> bool {
+    get_count(env) == get_index(env).len()
+}

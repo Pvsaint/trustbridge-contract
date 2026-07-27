@@ -143,6 +143,9 @@ Behavior:
 - If a verified username is updated to a new Stellar address, verification is
   cleared until the admin verifies the updated address. The Wave #49 regression
   test covers re-verification against the new address.
+- Index-length invariant: every successful `register` increments `COUNT_KEY`
+  **and** appends to `INDEX_KEY` atomically. A re-registration of an existing
+  username does neither. See [SECURITY.md](SECURITY.md#index-length-invariant).
 
 **Username rules** (enforced on-chain, checked before auth):
 
@@ -248,6 +251,12 @@ Stats invariant: partial removal decrements `total` only for the removed record
 and decrements `verified` only when that removed record was verified. Removing
 an unverified record while another verified record remains must leave
 `verified` unchanged; this is covered by the Wave #46 regression test.
+
+Index-length invariant: after every `remove`, `get_stats().total` must equal
+the length of the flat username index. Both are updated atomically in the same
+transaction. See the **Index-Length Invariant** section in
+[SECURITY.md](SECURITY.md#index-length-invariant) and the test suite in
+`tests/integration.rs` (Issue #59 / Wave #60).
 
 ---
 
