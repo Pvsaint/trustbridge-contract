@@ -42,12 +42,12 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
     if len == 0 {
         return true;
     }
-    if len > USERNAME_BUF_LEN {
+    if len > USERNAME_BUF {
         // Too long to inspect on the stack, but definitively not whitespace-only
         // for any input this contract accepts.
         return false;
     }
-    let mut buf = [0u8; USERNAME_BUF_LEN];
+    let mut buf = [0u8; USERNAME_BUF];
     s.copy_into_slice(&mut buf[..len]);
     buf[..len].iter().all(|b| b.is_ascii_whitespace())
 }
@@ -65,9 +65,22 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
 /// Rejecting them would strand those records: `remove` looks the username up by
 /// exact key, so a name that cannot be expressed can never be cleaned up.
 ///
-/// The comparison is byte-wise ASCII. `String::len()` returns a byte count, so
-/// any multi-byte UTF-8 sequence fails the alphanumeric check on its leading
-/// byte and is rejected — which is correct, since GitHub usernames are ASCII.
+/// ## Unicode rejection policy
+///
+/// GitHub usernames are ASCII-only. Any username containing a non-ASCII byte —
+/// including multi-byte UTF-8 sequences for accented letters (é, ü, ñ), emoji,
+/// CJK characters, or Cyrillic/Arabic/Hebrew homoglyphs — is rejected with
+/// `InvalidUsername`.
+///
+/// The check is byte-wise: `String::len()` returns a byte count, not a Unicode
+/// scalar count. Any multi-byte UTF-8 sequence has a leading byte ≥ 0x80, which
+/// is not an ASCII alphanumeric (0x30–0x39, 0x41–0x5A, 0x61–0x7A), a hyphen
+/// (0x2D), or an underscore (0x5F), so the per-byte character check rejects it.
+/// This makes homoglyph substitution attacks (e.g. Cyrillic 'а' for ASCII 'a')
+/// impossible — the bytes differ even if the glyphs look the same.
+///
+/// The validation path never allocates: the contract is `#![no_std]` and
+/// operates on a fixed 64-byte stack buffer.
 pub fn is_valid_github_username(s: &String) -> bool {
     if s.len() > MAX_USERNAME_LEN {
         return false;
@@ -85,10 +98,30 @@ pub fn is_valid_github_username(s: &String) -> bool {
         return false;
     }
 
-    // All characters must be alphanumeric, hyphen, or underscore.
-    bytes
-        .iter()
-        .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+    // Walk every byte: reject non-ASCII (> 0x7F), reject disallowed ASCII
+    // punctuation, and reject consecutive hyphens.
+    let mut prev_was_hyphen = false;
+    for &b in bytes.iter() {
+        // Non-ASCII byte — covers all multi-byte UTF-8 sequences.
+        if !b.is_ascii() {
+            return false;
+        }
+        // Consecutive hyphens not allowed (GitHub rule).
+        if b == b'-' {
+            if prev_was_hyphen {
+                return false;
+            }
+            prev_was_hyphen = true;
+        } else {
+            prev_was_hyphen = false;
+            // All non-hyphen characters must be alphanumeric or underscore.
+            if !b.is_ascii_alphanumeric() && b != b'_' {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 /// Case-insensitive comparison of two usernames.
@@ -98,29 +131,19 @@ pub fn is_valid_github_username(s: &String) -> bool {
 /// GitHub identity. Note that storage keys are still case-*sensitive*: this
 /// compares two values, it does not normalise them.
 pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
-    let len = a.len() as usize;
-    if len != b.len() as usize {
+    if a.len() != b.len() {
         return false;
     }
-    if len == 0 {
+    if a.is_empty() {
         return true;
     }
-    if len > USERNAME_BUF_LEN {
-        return false;
-    }
-
-    let mut buf_a = [0u8; USERNAME_BUF_LEN];
-    let mut buf_b = [0u8; USERNAME_BUF_LEN];
-    a.copy_into_slice(&mut buf_a[..len]);
-    b.copy_into_slice(&mut buf_b[..len]);
-
     let mut buf_a = [0u8; USERNAME_BUF];
     let mut buf_b = [0u8; USERNAME_BUF];
     let (len_a, len_b) = match (copy_into_buf(a, &mut buf_a), copy_into_buf(b, &mut buf_b)) {
         (Some(la), Some(lb)) => (la, lb),
-        // Equal lengths that failed to buffer means both are empty (equal) or
-        // both are too long to compare on the stack (reported unequal).
-        _ => return a.is_empty(),
+        // Both failed to buffer: both are either empty (already handled above)
+        // or too long for the stack buffer — report unequal in that case.
+        _ => return false,
     };
 
     buf_a[..len_a]
@@ -152,6 +175,8 @@ mod tests {
         String::from_str(env, value)
     }
 
+    // ── Basic helpers ─────────────────────────────────────────────────────────
+
     #[test]
     fn test_is_empty() {
         let env = Env::default();
@@ -163,34 +188,309 @@ mod tests {
     #[test]
     fn test_is_empty_or_whitespace() {
         let env = Env::default();
-
         assert!(is_empty_or_whitespace(&s(&env, "")));
         assert!(is_empty_or_whitespace(&s(&env, "   ")));
         assert!(!is_empty_or_whitespace(&s(&env, "hello")));
     }
 
+    // ── Valid username acceptance ─────────────────────────────────────────────
+
     #[test]
     fn test_accepts_valid_usernames() {
         let env = Env::default();
-
         assert!(is_valid_github_username(&s(&env, "alice")));
         assert!(is_valid_github_username(&s(&env, "bob-smith")));
         assert!(is_valid_github_username(&s(&env, "user_123")));
-        assert!(!is_valid_github_username(&s(&env, "-invalid")));
-        assert!(!is_valid_github_username(&s(&env, "invalid-")));
-        assert!(!is_valid_github_username(&s(&env, "a@invalid")));
+        assert!(is_valid_github_username(&s(&env, "foo-bar-baz")));
+        assert!(is_valid_github_username(&s(&env, "a")));
+        assert!(is_valid_github_username(&s(&env, "Z")));
+        assert!(is_valid_github_username(&s(&env, "9")));
+    }
+
+    #[test]
+    fn test_max_length_boundary() {
+        let env = Env::default();
+        // 39 chars — exactly at limit, must accept
+        assert!(is_valid_github_username(&s(
+            &env,
+            "abcdefghijklmnopqrstuvwxyz0123456789abc"
+        )));
+        // 40 chars — one over limit, must reject
+        assert!(!is_valid_github_username(&s(
+            &env,
+            "abcdefghijklmnopqrstuvwxyz0123456789abcd"
+        )));
+    }
+
+    // ── ASCII rejection cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_empty_username_rejected() {
+        let env = Env::default();
         assert!(!is_valid_github_username(&s(&env, "")));
     }
 
     #[test]
+    fn test_hyphen_or_underscore_at_boundary_rejected() {
+        let env = Env::default();
+        assert!(!is_valid_github_username(&s(&env, "-invalid")));
+        assert!(!is_valid_github_username(&s(&env, "invalid-")));
+        assert!(!is_valid_github_username(&s(&env, "_leading")));
+        assert!(!is_valid_github_username(&s(&env, "trailing_")));
+    }
+
+    #[test]
+    fn test_disallowed_ascii_punctuation_rejected() {
+        let env = Env::default();
+        assert!(!is_valid_github_username(&s(&env, "a@invalid")));
+        assert!(!is_valid_github_username(&s(&env, "dot.name")));
+        assert!(!is_valid_github_username(&s(&env, "has space")));
+        assert!(!is_valid_github_username(&s(&env, "slash/name")));
+        assert!(!is_valid_github_username(&s(&env, "col:on")));
+    }
+
+    #[test]
+    fn test_ascii_control_characters_rejected() {
+        let env = Env::default();
+        assert!(!is_valid_github_username(&s(&env, "user\x00name")));
+        assert!(!is_valid_github_username(&s(&env, "user\x09name"))); // tab
+        assert!(!is_valid_github_username(&s(&env, "user\x0aname"))); // newline
+    }
+
+    // ── Consecutive hyphens (Issue #70) ───────────────────────────────────────
+
+    /// Consecutive hyphens must be rejected — this is a rule that was
+    /// documented but not enforced before Wave #69.
+    #[test]
+    fn test_consecutive_hyphens_rejected() {
+        let env = Env::default();
+        assert!(!is_valid_github_username(&s(&env, "foo--bar")));
+        assert!(!is_valid_github_username(&s(&env, "foo---bar")));
+        assert!(!is_valid_github_username(&s(&env, "a--b")));
+        // Single hyphens at any interior position remain valid
+        assert!(is_valid_github_username(&s(&env, "foo-bar")));
+        assert!(is_valid_github_username(&s(&env, "f-o-o")));
+    }
+
+    // ── Unicode rejection policy (Wave #69 / Issue #70) ──────────────────────
+    //
+    // GitHub usernames are ASCII-only. Every non-ASCII byte — whether a lone
+    // high byte or part of a multi-byte UTF-8 sequence — must be rejected.
+    //
+    // The on-chain check is byte-wise: `is_ascii()` returns false for any byte
+    // > 0x7F, which covers every non-ASCII codepoint regardless of encoding.
+    // This prevents homoglyph attacks where a Cyrillic 'а' (U+0430) is
+    // substituted for ASCII 'a' (U+0061) — the byte sequences differ even
+    // though the glyphs may look identical.
+
+    /// Latin-extended characters (é, ü, ñ) must be rejected.
+    ///
+    /// `café` = [0x63, 0x61, 0x66, 0xC3, 0xA9] — 0xC3 is the leading byte of
+    /// U+00E9 LATIN SMALL LETTER E WITH ACUTE and is not ASCII.
+    #[test]
+    fn test_unicode_latin_extended_rejected() {
+        let env = Env::default();
+        assert!(
+            !is_valid_github_username(&s(&env, "caf\u{e9}")),
+            "café must be rejected (U+00E9 é is non-ASCII)"
+        );
+        assert!(
+            !is_valid_github_username(&s(&env, "na\u{ef}ve")),
+            "naïve must be rejected (U+00EF ï is non-ASCII)"
+        );
+        assert!(
+            !is_valid_github_username(&s(&env, "jalape\u{f1}o")),
+            "jalapeño must be rejected (U+00F1 ñ is non-ASCII)"
+        );
+    }
+
+    /// Emoji must be rejected.
+    ///
+    /// Emoji are encoded as 3- or 4-byte UTF-8 sequences whose leading byte is
+    /// ≥ 0xE0 or 0xF0.  Neither qualifies as ASCII.
+    #[test]
+    fn test_unicode_emoji_rejected() {
+        let env = Env::default();
+        // U+1F600 GRINNING FACE — 4-byte sequence [0xF0, 0x9F, 0x98, 0x80]
+        assert!(
+            !is_valid_github_username(&s(&env, "user\u{1f600}")),
+            "emoji suffix must be rejected"
+        );
+        // U+2764 HEAVY BLACK HEART — 3-byte sequence [0xE2, 0x9D, 0xA4]
+        assert!(
+            !is_valid_github_username(&s(&env, "user\u{2764}")),
+            "heart emoji must be rejected"
+        );
+        // Emoji-only username
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{1f600}\u{1f600}")),
+            "emoji-only username must be rejected"
+        );
+    }
+
+    /// CJK (Chinese, Japanese, Korean) characters must be rejected.
+    ///
+    /// CJK codepoints start at U+4E00 and are encoded as 3-byte UTF-8
+    /// sequences — leading bytes 0xE4–0xE9.
+    #[test]
+    fn test_unicode_cjk_rejected() {
+        let env = Env::default();
+        // U+4E2D CJK UNIFIED IDEOGRAPH (中) — [0xE4, 0xB8, 0xAD]
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{4e2d}user")),
+            "CJK prefix must be rejected"
+        );
+        // U+3042 HIRAGANA LETTER A (あ) — [0xE3, 0x81, 0x82]
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{3042}user")),
+            "Hiragana prefix must be rejected"
+        );
+        // CJK-only username
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{4e2d}\u{6587}")),
+            "CJK-only username must be rejected"
+        );
+    }
+
+    /// RTL script characters (Arabic, Hebrew) must be rejected.
+    ///
+    /// These are 2-byte UTF-8 sequences in the range 0xD5–0xDB.
+    #[test]
+    fn test_unicode_arabic_and_rtl_rejected() {
+        let env = Env::default();
+        // U+0645 ARABIC LETTER MEEM (م) — [0xD9, 0x85]
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{0645}user")),
+            "Arabic prefix must be rejected"
+        );
+        // U+05D0 HEBREW LETTER ALEF (א) — [0xD7, 0x90]
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{05d0}user")),
+            "Hebrew prefix must be rejected"
+        );
+    }
+
+    /// Cyrillic and Greek homoglyph attacks must be rejected.
+    ///
+    /// These are among the most dangerous Unicode spoofing vectors: characters
+    /// that look visually identical (or nearly identical) to ASCII letters but
+    /// occupy different codepoints and byte sequences.  Because validation is
+    /// byte-wise rather than glyph-wise, even a perfect-looking lookalike is
+    /// caught by the `is_ascii()` gate.
+    #[test]
+    fn test_unicode_homoglyph_attack_rejected() {
+        let env = Env::default();
+        // U+0430 CYRILLIC SMALL LETTER A (а) — looks like ASCII 'a', encoded [0xD0, 0xB0]
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{0430}lice")),
+            "Cyrillic 'a' homoglyph prefix must be rejected"
+        );
+        // U+03BF GREEK SMALL LETTER OMICRON (ο) — looks like ASCII 'o', encoded [0xCF, 0xBF]
+        assert!(
+            !is_valid_github_username(&s(&env, "b\u{03bf}b")),
+            "Greek omicron homoglyph must be rejected"
+        );
+        // U+0435 CYRILLIC SMALL LETTER IE (е) — looks like ASCII 'e', encoded [0xD0, 0xB5]
+        assert!(
+            !is_valid_github_username(&s(&env, "al\u{0435}x")),
+            "Cyrillic 'e' homoglyph must be rejected"
+        );
+        // U+0441 CYRILLIC SMALL LETTER ES (с) — looks like ASCII 'c', encoded [0xD1, 0x81]
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{0441}arol")),
+            "Cyrillic 'c' homoglyph prefix must be rejected"
+        );
+    }
+
+    /// Usernames composed entirely of non-ASCII characters must be rejected.
+    #[test]
+    fn test_unicode_all_non_ascii_rejected() {
+        let env = Env::default();
+        // Entirely Cyrillic
+        assert!(
+            !is_valid_github_username(&s(
+                &env,
+                "\u{0430}\u{043b}\u{0438}\u{0441}\u{0430}"
+            )),
+            "all-Cyrillic username must be rejected"
+        );
+        // Entirely CJK
+        assert!(
+            !is_valid_github_username(&s(&env, "\u{4e2d}\u{6587}")),
+            "all-CJK username must be rejected"
+        );
+    }
+
+    /// Non-ASCII characters embedded anywhere in an otherwise valid-looking
+    /// ASCII username must still be rejected.
+    #[test]
+    fn test_unicode_embedded_at_any_position_rejected() {
+        let env = Env::default();
+        // Non-ASCII in the middle
+        assert!(!is_valid_github_username(&s(&env, "al\u{00e9}ce")));
+        // Non-ASCII near the end (U+00E9 encodes as [0xC3, 0xA9]; 0xC3 is > 0x7F)
+        // The trailing 0xA9 is also non-ASCII, but first byte is caught first.
+        assert!(!is_valid_github_username(&s(&env, "alice\u{00e9}")));
+        // Non-ASCII at the start
+        assert!(!is_valid_github_username(&s(&env, "\u{00e9}alice")));
+    }
+
+    /// A lone high byte (invalid UTF-8 / raw non-ASCII) must be rejected.
+    ///
+    /// This guards against crafted byte sequences that might not be valid
+    /// Unicode but still contain bytes above 0x7F.
+    #[test]
+    fn test_raw_high_byte_rejected() {
+        let env = Env::default();
+        // The soroban_sdk String::from_str takes a &str (valid UTF-8), so we
+        // use the closest single-byte non-ASCII codepoint U+0080 PADDING CHAR
+        // which encodes as [0xC2, 0x80] — both bytes are > 0x7F.
+        assert!(!is_valid_github_username(&s(&env, "user\u{0080}name")));
+        // U+00FF LATIN SMALL LETTER Y WITH DIAERESIS — [0xC3, 0xBF]
+        assert!(!is_valid_github_username(&s(&env, "user\u{00ff}")));
+    }
+
+    // ── Confirm pure-ASCII valid cases still pass after policy hardening ───────
+
+    /// Regression: adding the Unicode gate must not break any currently-valid
+    /// ASCII username shape.
+    #[test]
+    fn test_valid_ascii_still_accepted_after_unicode_hardening() {
+        let env = Env::default();
+        let valid = [
+            "octocat",
+            "alice",
+            "bob123",
+            "user-name",
+            "user_name",
+            "a1b2c3",
+            "ALLCAPS",
+            "MixedCase",
+            "x",
+            "a-b",
+            "foo-bar-baz",
+            "abc_def_123",
+        ];
+        for name in &valid {
+            assert!(
+                is_valid_github_username(&s(&env, name)),
+                "{name} must still be accepted after unicode hardening"
+            );
+        }
+    }
+
+    // ── Case-insensitive comparison ───────────────────────────────────────────
+
+    #[test]
     fn test_eq_ignore_ascii_case() {
         let env = Env::default();
-
         assert!(eq_ignore_ascii_case(&s(&env, "Alice"), &s(&env, "alice")));
         assert!(eq_ignore_ascii_case(&s(&env, "BOB-1"), &s(&env, "bob-1")));
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "bob")));
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "alice1")));
     }
+
+    // ── Percentage helper ─────────────────────────────────────────────────────
 
     #[test]
     fn test_calculate_verification_percentage() {
