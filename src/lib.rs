@@ -19,16 +19,19 @@ pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
+use crate::batch::BatchConfig;
 use crate::storage::{
     add_to_index, get_admin, get_cooldown as storage_get_cooldown, get_count, get_index,
     get_last_upgrade, get_record, get_registered_paginated_internal, get_role as storage_get_role,
     get_stats as read_stats, get_verified_count as storage_get_verified_count,
-    get_version as storage_get_version, has_record, is_admin_caller, is_in_cooldown,
+    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance,
+    has_record, has_role_or_admin, is_admin_caller, is_in_cooldown,
     is_paused as storage_is_paused, remove_from_index, remove_record,
-    remove_role as storage_remove_role, require_initialized, require_not_paused,
-    set_cooldown as storage_set_cooldown, set_count, set_last_action, set_last_upgrade,
-    set_paused as set_paused_state, set_record, set_role as storage_set_role, set_verified_count,
-    set_version, ADMIN_KEY,
+    remove_role as storage_remove_role, remove_wasm_attestation, require_initialized,
+    require_not_paused, set_cooldown as storage_set_cooldown, set_count, set_last_action,
+    set_last_upgrade, set_paused as set_paused_state, set_record, set_role as storage_set_role,
+    set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance,
+    WasmAttestation, WasmProvenance, ADMIN_KEY,
 };
 use crate::utils::{eq_ignore_ascii_case, is_valid_github_username, MAX_USERNAME_LEN};
 
@@ -646,7 +649,7 @@ impl TrustBridgeContract {
     }
 
     /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
-    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
+    pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
