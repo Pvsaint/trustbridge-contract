@@ -2588,4 +2588,473 @@ mod test {
             assert_eq!(TrustBridgeContract::get_role(env.clone(), verifier.clone()), Some(Role::Verifier));
         });
     }
+
+    // ── Issue #114: verify / revoke_verification auth negative matrix ─────────
+    //
+    // Matrix of all unauthorized / invalid call paths for verify and
+    // revoke_verification, with expected ContractError codes.  Each test
+    // corresponds to exactly one cell in the table published in docs/SECURITY.md.
+    //
+    // verify negative matrix:
+    // | # | Scenario                              | Expected error    | Code |
+    // |---|---------------------------------------|-------------------|------|
+    // | V1 | Not initialized                      | NotInitialized    |  2   |
+    // | V2 | Username not registered               | NotRegistered     |  4   |
+    // | V3 | Already verified (double-verify)      | AlreadyVerified   |  5   |
+    // | V4 | Caller has no role                    | NotAuthorized     |  3   |
+    // | V5 | Upgrader-role caller                  | NotAuthorized     |  3   |
+    // | V6 | Admin caller (happy path)             | Ok(())            |  —   |
+    // | V7 | Verifier-role caller (happy path)     | Ok(())            |  —   |
+    // | V8 | Contract is paused                    | Paused            |  7   |
+    //
+    // revoke_verification negative matrix:
+    // | # | Scenario                              | Expected error    | Code |
+    // |---|---------------------------------------|-------------------|------|
+    // | R1 | Not initialized                      | NotInitialized    |  2   |
+    // | R2 | Username not registered               | NotRegistered     |  4   |
+    // | R3 | Record not verified (can't revoke)    | NotVerified       |  6   |
+    // | R4 | Caller has no role                    | NotAuthorized     |  3   |
+    // | R5 | Upgrader-role caller                  | NotAuthorized     |  3   |
+    // | R6 | Admin caller (happy path)             | Ok(())            |  —   |
+    // | R7 | Verifier-role caller (happy path)     | Ok(())            |  —   |
+    // | R8 | Contract is paused                    | Paused            |  7   |
+
+    // ── verify negative matrix ────────────────────────────────────────────────
+
+    /// #114-V1: verify before initialization returns NotInitialized (code 2).
+    #[test]
+    fn test_verify_negative_not_initialized() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                caller.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotInitialized),
+                "verify before init must return NotInitialized (code {})",
+                ContractError::NotInitialized.code()
+            );
+            assert_eq!(ContractError::NotInitialized.code(), 2);
+        });
+    }
+
+    /// #114-V2: verify on a username that was never registered returns NotRegistered (code 4).
+    #[test]
+    fn test_verify_negative_username_not_registered() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                admin.clone(),
+                username(&env, "ghost"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotRegistered),
+                "verify on missing username must return NotRegistered (code {})",
+                ContractError::NotRegistered.code()
+            );
+            assert_eq!(ContractError::NotRegistered.code(), 4);
+        });
+    }
+
+    /// #114-V3: double-verify returns AlreadyVerified (code 5).
+    #[test]
+    fn test_verify_negative_already_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::AlreadyVerified),
+                "second verify must return AlreadyVerified (code {})",
+                ContractError::AlreadyVerified.code()
+            );
+            assert_eq!(ContractError::AlreadyVerified.code(), 5);
+        });
+    }
+
+    /// #114-V4: address with no role cannot verify — returns NotAuthorized (code 3).
+    #[test]
+    fn test_verify_negative_no_role_caller() {
+        let env = Env::default();
+        let (_admin, user, nobody, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                nobody.clone(), // no role
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "no-role caller must not be able to verify (code {})",
+                ContractError::NotAuthorized.code()
+            );
+            assert_eq!(ContractError::NotAuthorized.code(), 3);
+        });
+    }
+
+    /// #114-V5: Upgrader-role address cannot verify — returns NotAuthorized (code 3).
+    #[test]
+    fn test_verify_negative_upgrader_cannot_verify() {
+        let env = Env::default();
+        let (_admin, user, upgrader, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), upgrader.clone(), Role::Upgrader).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                upgrader.clone(), // Upgrader role — not allowed
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "Upgrader-role must not be allowed to verify (code {})",
+                ContractError::NotAuthorized.code()
+            );
+        });
+    }
+
+    /// #114-V6 (happy path): admin can verify a registered user.
+    #[test]
+    fn test_verify_positive_admin_can_verify() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified,
+                "admin verify must set verified=true"
+            );
+        });
+    }
+
+    /// #114-V7 (happy path): Verifier-role address can verify.
+    #[test]
+    fn test_verify_positive_verifier_role_can_verify() {
+        let env = Env::default();
+        let (_admin, user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "octocat"))
+                .unwrap();
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified,
+                "Verifier-role verify must set verified=true"
+            );
+        });
+    }
+
+    /// #114-V8: verify while contract is paused returns Paused (code 7).
+    #[test]
+    fn test_verify_negative_paused() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone()).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::Paused),
+                "verify while paused must return Paused (code {})",
+                ContractError::Paused.code()
+            );
+            assert_eq!(ContractError::Paused.code(), 7);
+            // Record must still be unverified
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified
+            );
+        });
+    }
+
+    // ── revoke_verification negative matrix ───────────────────────────────────
+
+    /// #114-R1: revoke_verification before initialization returns NotInitialized (code 2).
+    #[test]
+    fn test_revoke_negative_not_initialized() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                caller.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotInitialized),
+                "revoke before init must return NotInitialized (code {})",
+                ContractError::NotInitialized.code()
+            );
+        });
+    }
+
+    /// #114-R2: revoke_verification on an unregistered username returns NotRegistered (code 4).
+    #[test]
+    fn test_revoke_negative_username_not_registered() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "ghost"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotRegistered),
+                "revoke on missing username must return NotRegistered (code {})",
+                ContractError::NotRegistered.code()
+            );
+        });
+    }
+
+    /// #114-R3: revoking on an unverified record returns NotVerified (code 6).
+    #[test]
+    fn test_revoke_negative_not_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotVerified),
+                "revoke on unverified record must return NotVerified (code {})",
+                ContractError::NotVerified.code()
+            );
+            assert_eq!(ContractError::NotVerified.code(), 6);
+        });
+    }
+
+    /// #114-R4: address with no role cannot revoke — returns NotAuthorized (code 3).
+    #[test]
+    fn test_revoke_negative_no_role_caller() {
+        let env = Env::default();
+        let (admin, user, nobody, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                nobody.clone(), // no role
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "no-role caller must not revoke verification (code {})",
+                ContractError::NotAuthorized.code()
+            );
+            // Verification must still be intact
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified
+            );
+        });
+    }
+
+    /// #114-R5: Upgrader-role address cannot revoke — returns NotAuthorized (code 3).
+    #[test]
+    fn test_revoke_negative_upgrader_cannot_revoke() {
+        let env = Env::default();
+        let (admin, user, upgrader, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), upgrader.clone(), Role::Upgrader).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                upgrader.clone(), // Upgrader role — not allowed
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "Upgrader-role must not revoke verification (code {})",
+                ContractError::NotAuthorized.code()
+            );
+        });
+    }
+
+    /// #114-R6 (happy path): admin can revoke verification.
+    #[test]
+    fn test_revoke_positive_admin_can_revoke() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            )
+            .unwrap();
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified,
+                "admin revoke must clear verified=false"
+            );
+        });
+    }
+
+    /// #114-R7 (happy path): Verifier-role address can revoke verification.
+    #[test]
+    fn test_revoke_positive_verifier_role_can_revoke() {
+        let env = Env::default();
+        let (admin, user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                verifier.clone(),
+                username(&env, "octocat"),
+            )
+            .unwrap();
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified,
+                "Verifier-role revoke must clear verified=false"
+            );
+        });
+    }
+
+    /// #114-R8: revoke_verification while paused returns Paused (code 7).
+    #[test]
+    fn test_revoke_negative_paused() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone()).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::Paused),
+                "revoke while paused must return Paused (code {})",
+                ContractError::Paused.code()
+            );
+            // Verification must still be intact
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified
+            );
+        });
+    }
+
+    /// #114-verify-error-codes: all verify/revoke-relevant error codes match their ABI discriminants.
+    #[test]
+    fn test_verify_revoke_negative_error_codes_match_abi() {
+        assert_eq!(ContractError::NotInitialized.code(), 2);
+        assert_eq!(ContractError::NotAuthorized.code(), 3);
+        assert_eq!(ContractError::NotRegistered.code(), 4);
+        assert_eq!(ContractError::AlreadyVerified.code(), 5);
+        assert_eq!(ContractError::NotVerified.code(), 6);
+        assert_eq!(ContractError::Paused.code(), 7);
+    }
 }

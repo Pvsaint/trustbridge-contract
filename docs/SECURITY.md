@@ -156,6 +156,64 @@ Operational teams should:
 
 ---
 
+## Verify and Revoke_Verification Auth Negative Matrix
+
+Dashboard operators and auditors need the full failure surface of `verify` and `revoke_verification` spelled out.
+The matrix below covers every unauthorized and invalid state transition.  Each cell maps to an automated
+unit test in `src/lib.rs` (search for `#114`).
+
+Cross-reference: [remove auth negative matrix](#remove-auth-negative-matrix) · [ABI reference](ABI.md#verifygithub_username-string---resultcontracterror)
+
+### `verify` — negative matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|---------------|------|------|
+| V1 | Contract not yet initialized | `NotInitialized` | 2 | `test_verify_negative_not_initialized` |
+| V2 | Username not registered | `NotRegistered` | 4 | `test_verify_negative_username_not_registered` |
+| V3 | Username already verified (double-verify) | `AlreadyVerified` | 5 | `test_verify_negative_already_verified` |
+| V4 | Caller has no role | `NotAuthorized` | 3 | `test_verify_negative_no_role_caller` |
+| V5 | `Role::Upgrader` holder | `NotAuthorized` | 3 | `test_verify_negative_upgrader_cannot_verify` |
+| V6 | **Admin caller** _(happy path)_ | `Ok(())` | — | `test_verify_positive_admin_can_verify` |
+| V7 | **`Role::Verifier` holder** _(happy path)_ | `Ok(())` | — | `test_verify_positive_verifier_role_can_verify` |
+| V8 | Contract is paused | `Paused` | 7 | `test_verify_negative_paused` |
+
+### `revoke_verification` — negative matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|---------------|------|------|
+| R1 | Contract not yet initialized | `NotInitialized` | 2 | `test_revoke_negative_not_initialized` |
+| R2 | Username not registered | `NotRegistered` | 4 | `test_revoke_negative_username_not_registered` |
+| R3 | Record not yet verified | `NotVerified` | 6 | `test_revoke_negative_not_verified` |
+| R4 | Caller has no role | `NotAuthorized` | 3 | `test_revoke_negative_no_role_caller` |
+| R5 | `Role::Upgrader` holder | `NotAuthorized` | 3 | `test_revoke_negative_upgrader_cannot_revoke` |
+| R6 | **Admin caller** _(happy path)_ | `Ok(())` | — | `test_revoke_positive_admin_can_revoke` |
+| R7 | **`Role::Verifier` holder** _(happy path)_ | `Ok(())` | — | `test_revoke_positive_verifier_role_can_revoke` |
+| R8 | Contract is paused | `Paused` | 7 | `test_revoke_negative_paused` |
+
+### Auth rules for `verify` and `revoke_verification`
+
+```
+caller == admin                   →  allowed
+caller has Role::Verifier         →  allowed
+caller has Role::Upgrader         →  NotAuthorized (code 3)
+caller has no role                →  NotAuthorized (code 3)
+```
+
+Both functions require a `caller: Address` argument so the contract can call
+`caller.require_auth()` and enforce the role check in a single auditable step.
+Only the admin and any address granted `Role::Verifier` via `set_role` may
+call these functions.
+
+The `verify` function additionally guards against illegal state transitions:
+- Verifying an unregistered username → `NotRegistered` (code 4)
+- Re-verifying an already-verified username → `AlreadyVerified` (code 5)
+
+The `revoke_verification` function guards:
+- Revoking from an unregistered username → `NotRegistered` (code 4)
+- Revoking from a username that was never verified → `NotVerified` (code 6)
+
+---
+
 ## Responsible Disclosure
 
 If you discover a security vulnerability:
