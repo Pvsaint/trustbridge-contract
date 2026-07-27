@@ -188,6 +188,28 @@ lto = true
 
 ## Future Considerations
 
-- **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md).
+- **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; see [docs/STORAGE_RENT.md](STORAGE_RENT.md) for the full rent economics and operator checklist.
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
+
+---
+
+## Storage Rent Economics (summary)
+
+Soroban persistent storage has a **time-to-live (TTL)** per entry.  Entries that are not read
+or written for more than `TTL_THRESHOLD` ledgers (~30 days) are extended automatically on every
+access.  Cold records — those touched only at registration time — silently approach expiry if
+no keeper extends them.
+
+| Storage class | TTL owner | Auto-extended by |
+|---------------|-----------|------------------|
+| Instance (`admin`, `count`, `idx`, …) | Contract instance | Any successful invocation |
+| Persistent `ContributorRecord` | Per-entry | `get_record`, `set_record`, `extend_registry_ttl` |
+| Persistent chunk index | Per-chunk | `get_chunk`, `set_chunk` |
+| Persistent role assignments | Per-address | `get_role`, `set_role` |
+
+See [docs/STORAGE_RENT.md](STORAGE_RENT.md) for:
+- Full cost intuition vs. N users
+- Instance vs. persistent key breakdown
+- Operator checklist for Wave timelines
+- Keeper implementation details
