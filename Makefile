@@ -15,12 +15,15 @@ GITHUB_USER ?=
 STELLAR_ADDR ?=
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
+REGISTER_BUDGET_CPU_MAX ?= 25000000
+REGISTER_BUDGET_MEM_MAX ?= 300000
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
+	invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+	bench-register-budget
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -50,6 +53,29 @@ bench-export: ## Write export CPU benchmark results to $(BENCH_OUT)
 bench-username: ## Write username case-normalization benchmark results to $(NORM_BENCH_OUT)
 	cargo test test_bench_username_case_normalization -- --nocapture --test-threads=1 | tee $(NORM_BENCH_OUT)
 	@echo "Benchmark results written to $(NORM_BENCH_OUT)"
+
+bench-register-budget: ## Validate register cost stays under CPU/memory thresholds (baseline + max-length username)
+	@echo "Running register budget sampling (CPU<=$(REGISTER_BUDGET_CPU_MAX), MEM<=$(REGISTER_BUDGET_MEM_MAX))"
+	@cargo test test_report_register_budget_samples -- --nocapture --test-threads=1 | \
+	awk -F',' -v cpu_max=$(REGISTER_BUDGET_CPU_MAX) -v mem_max=$(REGISTER_BUDGET_MEM_MAX) '\
+	BEGIN { baseline=0; stressed=0; failed=0 } \
+	/^register,(baseline|max_username_len),/ { \
+	  input=$$2; cpu=$$3+0; mem=$$4+0; \
+	  if (input=="baseline") baseline=1; \
+	  if (input=="max_username_len") stressed=1; \
+	  if (cpu > cpu_max || mem > mem_max) { \
+	    failed=1; \
+	    printf("ERROR: register budget exceeded for input=%s (cpu=%d, mem=%d, limits cpu<=%d mem<=%d)\n", input, cpu, mem, cpu_max, mem_max); \
+	  } \
+	} \
+	END { \
+	  if (!baseline || !stressed) { \
+	    print "ERROR: register budget output missing baseline or max_username_len sample"; \
+	    exit 2; \
+	  } \
+	  if (failed) exit 1; \
+	  print "OK: register budget samples are within configured thresholds"; \
+	}'
 
 fmt: ## Check formatting
 	cargo fmt --all -- --check

@@ -133,6 +133,45 @@ the PR. Reviewers should be able to see every crate that was added.
 | Partial write during failure | Not possible. Soroban transactions are atomic, and validation runs before the first write. | None. |
 | 100+ contributor scale | `get_all_registered` is a linear full-index scan and grows with registry size. | Prefer event indexing (see [EVENT_INDEXING.md](EVENT_INDEXING.md)) over repeated full exports. Watch the export benchmark in [ABI.md](ABI.md#cost-and-benchmarks) for regressions. |
 
+## Register Budget Guard
+
+Contributor onboarding depends on `register`, so fee spikes or budget
+exhaustion are treated as availability risks.
+
+Budget thresholds (current defaults in `Makefile`):
+
+- CPU instructions: `25_000_000` max
+- Memory bytes: `300_000` max
+
+The guard measures two inputs:
+
+1. Baseline username (`octocat`)
+2. Stressed username (maximum allowed username length)
+
+Run locally:
+
+```bash
+make bench-register-budget
+```
+
+Override thresholds when updating the baseline:
+
+```bash
+make bench-register-budget REGISTER_BUDGET_CPU_MAX=26000000 REGISTER_BUDGET_MEM_MAX=320000
+```
+
+Failure output identifies which sample exceeded the budget using
+`input=baseline` or `input=max_username_len`.
+
+### Remediation when budget is exceeded
+
+1. Reduce writes in `register` (avoid unnecessary index/counter touches).
+2. Keep username handling bounded (`MAX_USERNAME_LEN`) and avoid extra string copying.
+3. Re-run `make bench-register-budget` and compare against prior output before
+  raising thresholds.
+4. If threshold changes are unavoidable, document rationale in PR notes and
+  update deployment/operator docs accordingly.
+
 ### Environment configuration
 
 Copy `.env.example` and fill every value explicitly. Configuration rules:
