@@ -35,3 +35,34 @@ instead when syncing incrementally — it walks the same admin-gated index but
 in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
+
+## Index compaction on removal (Issue #110)
+
+When a user is removed from the registry via `remove()`, the contract uses
+**index compaction** rather than swap-remove or tombstones:
+
+- The username index is rebuilt without the removed entry
+- Remaining entries preserve their relative order
+- No holes are left in the index
+- `get_stats().total` always matches the actual number of accessible records
+
+This means:
+- **Exports are stable**: Paginated reads (`get_registered_paginated`,
+  `get_public_paginated`) return consistent results without skipping or
+  duplicating entries after removal
+- **No index holes**: Dashboard sync jobs can safely walk the index from
+  `cursor=0` to `total` without encountering missing records
+- **Stats accuracy**: The `total` count in stats and export pages always
+  reflects the current number of registered users
+
+Example: Register users A, B, C → Remove B → Exports contain exactly A and C
+in order, with `total=2`.
+
+Integrators building dashboards or indexers should:
+- Trust that `get_stats().total` matches the number of exportable records
+- Use paginated endpoints (`get_registered_paginated` or
+  `get_public_paginated`) for incremental sync
+- Not implement special handling for "holes" in the index — there are none
+
+Regression coverage: `test_integration_middle_user_removal_index_compaction`
+in `tests/integration.rs`.
