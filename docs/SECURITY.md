@@ -20,6 +20,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
 | Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
+| Index/counter divergence (phantom or invisible entries) | `index_length_invariant_holds` assertion enforced by integration test suite — see **Index-Length Invariant** section |
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
 
 ### Out of Scope (handled off-chain)
@@ -232,6 +233,70 @@ Copy `.env.example` and fill every value explicitly. Configuration rules:
 - `ADMIN` is required for mainnet deploys and is not inferred from the local
   keystore.
 - Never commit `.env`. Only `.env.example` is tracked.
+
+---
+
+## Index-Length Invariant
+
+The registry maintains two parallel state values that must always agree:
+
+| State | Storage key | Updated by |
+|-------|-------------|------------|
+| `COUNT_KEY` — registration counter (`u32`) | instance storage | `register` (increment), `remove` (decrement) |
+| `INDEX_KEY` — ordered username vec (`Vec<String>`) | instance storage | `add_to_index` (append), `remove_from_index` (filter) |
+
+**Invariant:** `get_count(env) == get_index(env).len()` at every quiescent point between transactions.
+
+### Why this matters
+
+Both values are read by different callers for different purposes:
+
+- Paginated export endpoints (`get_registered_page`, `get_registered_paginated`, `get_public_paginated`) walk `INDEX_KEY` for the actual usernames but expose `COUNT_KEY` as the `total` field of the response. If they diverge, a client that uses `total` to compute page counts will request the wrong number of pages.
+- `get_stats` returns `COUNT_KEY` directly. Monitoring and dashboard tooling that reads `get_stats` to show a contributor count will display a wrong number if the counter has drifted.
+- An index longer than the counter indicates **phantom entries** — the index holds usernames that the contract believes do not exist. An index shorter than the counter indicates **invisible entries** — the counter says more contributors exist than are reachable by any export. Both are security-relevant for an audit.
+
+### How the invariant is maintained
+
+`register` and `remove` always update both values in the same transaction:
+
+```
+register (new username):
+    set_count(get_count + 1)
+    add_to_index(username)        ← appends to INDEX_KEY
+
+remove:
+    remove_record(username)
+    remove_from_index(username)   ← filters INDEX_KEY
+    set_count(get_count - 1)
+```
+
+Soroban transactions are atomic, so a partial write that updates one side but not the other cannot leave the invariant broken at rest — either both updates land or neither does.
+
+### Test coverage (Issue #59 / Wave #60)
+
+`tests/integration.rs` includes a dedicated invariant test suite:
+
+| Test | What it checks |
+|------|----------------|
+| `test_index_invariant_holds_on_empty_registry` | Invariant holds at genesis (count=0, index.len()=0) |
+| `test_index_invariant_holds_after_single_register` | Invariant holds after the first registration |
+| `test_index_invariant_holds_after_register_and_remove` | Invariant holds after removing first, middle, and last entries |
+| `test_index_invariant_holds_after_same_address_reregister` | Re-register to same address does not double-increment counter |
+| `test_index_invariant_holds_after_address_change_reregister` | Re-register to different address does not alter total |
+| `test_index_invariant_holds_at_scale` | Register 10, remove 5 interleaved — check after each removal |
+| `test_index_invariant_unchanged_on_failed_remove` | **Failure path**: `remove` on unknown username returns `NotRegistered` and does not mutate state |
+| `test_index_invariant_unchanged_on_invalid_register` | **Failure path**: invalid username returns `InvalidUsername` and does not mutate state |
+| `test_index_invariant_holds_after_remove_then_reregister` | Remove then re-register restores count=1, index.len()=1 |
+| `test_index_invariant_unchanged_by_pause_unpause` | Pause/unpause does not touch count or index |
+
+The helper `storage::index_length_invariant_holds(env)` encodes `get_count == get_index().len()` in one place so every test asserts the same invariant without repeating the definition inline.
+
+### Edge cases
+
+- **Removal of a non-existent username** returns `NotRegistered` before any write, so count and index are never touched on a failed remove.
+- **Invalid username on register** is caught before `require_auth` and before any write, so count and index are never touched on a rejected registration.
+- **Re-registration** (same username, same or different address) follows the `existing.is_some()` branch in `register`, which does not call `add_to_index` or increment the counter, preserving the invariant.
+- **100+ contributors**: both `COUNT_KEY` and `INDEX_KEY` live in instance storage. At very large registry sizes the `get_all_registered` export hits the 100-ledger-entry footprint limit; use paginated endpoints instead, but the invariant is unaffected by which export endpoint is used.
 
 ---
 

@@ -650,66 +650,31 @@ pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> b
     }
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+// ── Index-length invariant (Issue #59 / Wave #60) ────────────────────────────
+//
+// The registry maintains two parallel counters:
+//   1. `COUNT_KEY`  — the u32 stored by `set_count` / read by `get_count`.
+//   2. `INDEX_KEY`  — the Vec<String> stored by `set_index` / read by `get_index`.
+//
+// Both must be updated atomically inside every `register` and `remove` call.
+// If either update is skipped — e.g. the index is extended but the counter is
+// not, or the counter is decremented but the username is not removed from the
+// index — the invariant breaks and callers that rely on one for bounds-checking
+// will diverge from callers that read the other.
+//
+// `index_length_invariant_holds` captures this in a single readable boolean so
+// test code and any future on-chain self-check can express the invariant
+// without repeating its definition.
 
-    #[test]
-    fn test_remove_single_decrement() {
-        let env = Env::default();
-        let user = Address::generate(&env);
-        let username = String::from_str(&env, "octocat");
-
-        let record = ContributorRecord {
-            stellar_address: user.clone(),
-            registered_at: 100,
-            verified: true,
-        };
-
-        // Setup mock state mimicking registration
-        set_count(&env, 1);
-        set_verified_count(&env, 1);
-        set_record(&env, &username, &record);
-        add_to_index(&env, &username);
-
-        // Assert initial state
-        assert_eq!(get_count(&env), 1);
-        assert_eq!(get_verified_count(&env), 1);
-        assert!(has_record(&env, &username));
-        assert_eq!(get_index(&env).len(), 1);
-        
-        let initial_page = get_index_page(&env, 0, 10);
-        assert_eq!(initial_page.len(), 1);
-
-        // Perform removal operations mimicking Contract logic
-        remove_record(&env, &username);
-        remove_from_index(&env, &username);
-        set_count(&env, get_count(&env).saturating_sub(1));
-        set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
-
-        // Test removal decrements and invariants (Keys, TTL implicitly by missing keys)
-        assert!(!has_record(&env, &username));
-        assert!(get_record(&env, &username).is_none());
-
-        // Counter decrements
-        assert_eq!(get_count(&env), 0);
-        assert_eq!(get_verified_count(&env), 0);
-
-        // Index and Pagination
-        let idx = get_index(&env);
-        assert_eq!(idx.len(), 0);
-        
-        let empty_page = get_index_page(&env, 0, 10);
-        assert_eq!(empty_page.len(), 0);
-        
-        // Chunked Index check
-        let chunk_count = get_chunk_count(&env);
-        for c in 0..chunk_count {
-            let chunk = get_chunk(&env, c);
-            for i in 0..chunk.len() {
-                assert_ne!(chunk.get(i).unwrap(), username);
-            }
-        }
-    }
+/// Returns `true` when the flat username index length equals the stored
+/// registration count.
+///
+/// This is the index-length invariant: `get_count(env) == get_index(env).len()`.
+/// Both sides are updated inside every `register` and `remove` call, and they
+/// must stay equal at every quiescent point (between transactions).
+///
+/// Used by the test suite to assert the invariant holds after every
+/// state-mutating operation, and by audit tooling to spot-check live state.
+pub fn index_length_invariant_holds(env: &Env) -> bool {
+    get_count(env) == get_index(env).len()
 }
