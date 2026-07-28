@@ -17,6 +17,17 @@ pub enum ContractError {
     /// The supplied GitHub username is empty, longer than
     /// `utils::MAX_USERNAME_LEN`, or contains characters GitHub does not allow.
     InvalidUsername = 11,
+    /// The upgrade attestation has lapsed, or `attest_upgrade` was called with
+    /// an `expires_at` that is not in the future.
+    AttestationExpired = 12,
+    /// A batch operation (e.g. `extend_registry_ttl`) was called with an
+    /// empty list or with more items than `BatchConfig::max_batch_size`.
+    InvalidBatchSize = 13,
+    /// `upgrade` was called with a hash that does not match the live
+    /// attestation. See `attest_upgrade`. Not part of the originally
+    /// requested code range but required for `src/lib.rs` (`upgrade`) to
+    /// compile — it referenced this variant already.
+    UnattestedWasm = 14,
 }
 
 impl ContractError {
@@ -41,6 +52,9 @@ impl ContractError {
             9 => Some(ContractError::InvalidVersion),
             10 => Some(ContractError::InvalidRole),
             11 => Some(ContractError::InvalidUsername),
+            12 => Some(ContractError::AttestationExpired),
+            13 => Some(ContractError::InvalidBatchSize),
+            14 => Some(ContractError::UnattestedWasm),
             _ => None,
         }
     }
@@ -63,6 +77,9 @@ impl ContractError {
 // | 9    | InvalidVersion       | migrate                            |
 // | 10   | InvalidRole          | set_role                           |
 // | 11   | InvalidUsername      | register                           |
+// | 12   | AttestationExpired   | attest_upgrade, upgrade            |
+// | 13   | InvalidBatchSize     | extend_registry_ttl                |
+// | 14   | UnattestedWasm       | upgrade                            |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

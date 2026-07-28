@@ -20,6 +20,10 @@ soroban-sdk = "26.0.1"
 [dev-dependencies]
 soroban-sdk = { version = "26.0.1", features = ["testutils"] }
 
+[features]
+# Optional gate for WASM-backed integration tests (see tests/integration.rs).
+wasm-test = []
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

@@ -266,6 +266,81 @@ stellar contract invoke --id $ID --source admin --network testnet \
   -- get_all_registered
 ```
 
+**Scale warning:** past ~100 contributors prefer paginated export
+([Issue #1](https://github.com/Stellar-TrustBridge/trustbridge-contract/issues/1),
+Issue #143). See [Paginated export](#paginated-export-issue-1--143) below and
+[DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).
+
+---
+
+## Paginated export (Issue #1 / #143)
+
+Bulk export must not exceed Soroban resource limits on large registries.
+`get_all_registered` remains available for small dumps; production sync jobs
+should page.
+
+### Limit constants (`src/storage.rs`)
+
+| Constant | Value | Notes |
+|----------|------:|-------|
+| `DEFAULT_PAGE_LIMIT` | `20` | Applied when `limit == 0` |
+| `MAX_PAGE_LIMIT` | `100` | Enforced by **clamping** (`limit.min(MAX_PAGE_LIMIT)`); over-limit does not error |
+
+Justification: a single invoke that materializes more than ~100 registry
+reads trips the ledger-entry footprint ceiling (see [Cost and
+benchmarks](#cost-and-benchmarks)). Capping the page keeps each call inside
+that budget while still allowing full export via a cursor loop.
+
+### `ExportPage`
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `records` | `Vec<(String, ContributorRecord)>` | Current page |
+| `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
+| `total` | `u32` | Live registration count |
+| `has_more` | `bool` | `true` when another page exists |
+
+### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+| | |
+|---|---|
+| **Auth** | Admin (`admin.require_auth()`) — unchanged by Issue #143 |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor 0 --limit 100
+```
+
+### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Same page shape and limit clamping; no admin auth; requires not paused.
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_public_paginated --cursor 0 --limit 100
+```
+
+### Consumer loop
+
+```text
+cursor ← 0
+repeat:
+  page ← get_registered_paginated(cursor, limit)   # or get_public_paginated
+  process(page.records)
+  if page.has_more is false OR page.next_cursor is None:
+    stop
+  cursor ← page.next_cursor
+```
+
+Exhaustion is when `has_more == false` / `next_cursor == None` (including an
+empty page when `cursor >= total`).
+
+Boundary tests: `test_paginated_export_at_max_page_limit`,
+`test_paginated_export_over_max_page_limit_clamps` in `src/lib.rs`.
+
 ---
 
 ### `verify(github_username: String) -> Result<(), ContractError>`
