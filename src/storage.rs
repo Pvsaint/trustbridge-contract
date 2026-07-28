@@ -1,3 +1,7 @@
+//! Instance vs. persistent storage layout, TTL constants, and per-key rent
+//! behavior are documented in `docs/STORAGE_RENT.md` — read that before
+//! changing `TTL_THRESHOLD` / `TTL_BUMP` or adding a new persistent key.
+
 use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::ContractError;
