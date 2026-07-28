@@ -17,6 +17,15 @@ pub enum ContractError {
     /// The supplied GitHub username is empty, longer than
     /// `utils::MAX_USERNAME_LEN`, or contains characters GitHub does not allow.
     InvalidUsername = 11,
+    /// A live upgrade attestation has passed its `expires_at` timestamp.
+    AttestationExpired = 12,
+    /// `upgrade` was called for a hash that does not match the live
+    /// attestation, while one is in effect.
+    UnattestedWasm = 13,
+    /// A batch call supplied zero items or more than `BatchConfig::max_batch_size`.
+    InvalidBatchSize = 14,
+    /// The supplied Stellar address is the well-known zero/burn address.
+    ZeroAddress = 15,
 }
 
 impl ContractError {
@@ -41,6 +50,10 @@ impl ContractError {
             9 => Some(ContractError::InvalidVersion),
             10 => Some(ContractError::InvalidRole),
             11 => Some(ContractError::InvalidUsername),
+            12 => Some(ContractError::AttestationExpired),
+            13 => Some(ContractError::UnattestedWasm),
+            14 => Some(ContractError::InvalidBatchSize),
+            15 => Some(ContractError::ZeroAddress),
             _ => None,
         }
     }
@@ -63,6 +76,10 @@ impl ContractError {
 // | 9    | InvalidVersion       | migrate                            |
 // | 10   | InvalidRole          | set_role                           |
 // | 11   | InvalidUsername      | register                           |
+// | 12   | AttestationExpired   | attest_upgrade, upgrade            |
+// | 13   | UnattestedWasm       | upgrade                            |
+// | 14   | InvalidBatchSize     | extend_registry_ttl                |
+// | 15   | ZeroAddress          | register                           |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

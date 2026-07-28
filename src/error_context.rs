@@ -96,6 +96,10 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::InvalidVersion => ErrorCategory::Validation,
         ContractError::InvalidRole => ErrorCategory::Validation,
         ContractError::InvalidUsername => ErrorCategory::Validation,
+        ContractError::AttestationExpired => ErrorCategory::Transient,
+        ContractError::UnattestedWasm => ErrorCategory::Permanent,
+        ContractError::InvalidBatchSize => ErrorCategory::Validation,
+        ContractError::ZeroAddress => ErrorCategory::Validation,
     }
 }
 

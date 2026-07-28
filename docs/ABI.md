@@ -65,11 +65,15 @@ enum Role {
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
 | 11 | `InvalidUsername` | Username is empty, over `max_username_len`, or contains disallowed characters |
+| 12 | `AttestationExpired` | Upgrade attestation's `expires_at` has passed |
+| 13 | `UnattestedWasm` | `upgrade` hash does not match the live attestation |
+| 14 | `InvalidBatchSize` | Batch call supplied zero items or more than the configured max |
+| 15 | `ZeroAddress` | Supplied Stellar address is the well-known zero/burn address |
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
-variant and returns `None` for any unrecognized code. All ten codes round-trip
+variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
-tests in `src/lib.rs` (`test_from_code_round_trips_all_variants`).
+tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
 ---
 
@@ -100,8 +104,20 @@ Register or update a GitHub username mapping.
 |---|---|
 | **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername`, `ZeroAddress` |
 | **Events** | `RegisteredEvent` |
+
+**Zero-address rejection:**
+
+`stellar_address` must not be the well-known zero/burn address
+(`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`, the strkey
+encoding of an all-zero ed25519 public key), or the call fails with
+`ZeroAddress` (code 15), checked before `require_auth`. On a live network
+`require_auth` would already reject this address — no private key exists for
+it — but `mock_all_auths` in tests and local sandboxes bypasses that check, so
+the explicit guard is what actually stops a mistaken zero-address registration
+in those environments, and gives dashboard/indexer consumers a typed error
+instead of an opaque auth failure. Use `is_address_zero` to pre-check.
 
 **Username validation:**
 
@@ -190,6 +206,19 @@ validate input before asking the user to sign.
 
 ---
 
+### `is_address_zero(address: Address) -> bool`
+
+Reports whether `address` is the well-known zero/burn address that `register`
+rejects, so a dashboard or indexer consumer can validate a Stellar address
+before asking a user to sign — mirroring `is_username_valid`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+---
+
 ### `usernames_match(a: String, b: String) -> bool`
 
 Case-insensitive username equality, matching GitHub's own semantics. Off-chain
@@ -268,7 +297,7 @@ stellar contract invoke --id $ID --source admin --network testnet \
 
 ---
 
-### `verify(github_username: String) -> Result<(), ContractError>`
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
 
