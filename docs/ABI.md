@@ -268,6 +268,23 @@ stellar contract invoke --id $ID --source admin --network testnet \
 
 ---
 
+### `config_verification(caller: Address, attestation: Symbol, expiry: u64, quorum: u32) -> Result<(), ContractError>`
+Configures Verification defaults (attestation identifier, expiration timestamp, signature threshold quorum). Implements double-initialize rejection specific to this feature area to prevent arbitrary overwrites (Wave #54).
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Caller arg** | `caller: Address` - must be the admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `AlreadyInitialized` |
+
+*Note: Triggers `AlreadyInitialized` if executed after the initial verification configuration is stored.*
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- config_verification --caller G... --attestation github_att --expiry 3600 --quorum 2
+```
+
+---
+
 ### `verify(github_username: String) -> Result<(), ContractError>`
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
