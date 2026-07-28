@@ -137,6 +137,15 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
     if a.is_empty() {
         return true;
     }
+    if len > USERNAME_BUF {
+        return false;
+    }
+
+    let mut buf_a = [0u8; USERNAME_BUF];
+    let mut buf_b = [0u8; USERNAME_BUF];
+    a.copy_into_slice(&mut buf_a[..len]);
+    b.copy_into_slice(&mut buf_b[..len]);
+
     let mut buf_a = [0u8; USERNAME_BUF];
     let mut buf_b = [0u8; USERNAME_BUF];
     let (len_a, len_b) = match (copy_into_buf(a, &mut buf_a), copy_into_buf(b, &mut buf_b)) {

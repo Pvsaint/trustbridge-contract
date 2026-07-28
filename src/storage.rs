@@ -19,28 +19,8 @@ pub const EMERGENCY_PAUSE_TS_KEY: Symbol = symbol_short!("emerg_ts");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
-pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chunkcnt");
-pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
-
-/// Entries per index chunk. Keeps a single chunk read well under the ledger
-/// entry size limit while still amortising reads across pages.
-pub const CHUNK_SIZE: u32 = 100;
-
-/// Page size used when a caller passes `limit = 0`.
-pub const DEFAULT_PAGE_LIMIT: u32 = 50;
-/// Upper bound on a single export page, to keep the response under the
-/// transaction result size limit.
-pub const MAX_PAGE_LIMIT: u32 = 200;
-
-/// Persistent entries are bumped when their remaining TTL drops below this.
-pub const TTL_THRESHOLD: u32 = 100_000;
-/// Ledgers of TTL to restore on bump (~60 days at 5s ledgers).
-pub const TTL_BUMP: u32 = 1_000_000;
-
-/// Key for the version stored at `storage::get_version` / `set_version`.
-/// Aliased as VERSION_KEY for callers that use that name.
-pub const VERSION_KEY: Symbol = VER_KEY;
+pub const PROV_KEY: Symbol = symbol_short!("prov");
+pub const ATTEST_KEY: Symbol = symbol_short!("attn");
 
 /// Key prefix for chunked username index entries.
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
@@ -578,6 +558,49 @@ pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
     }
     let now = env.ledger().timestamp();
     now < last.saturating_add(cooldown)
+}
+
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VER_KEY)
+}
+
+pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, version);
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
+    }
+}
+pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, version);
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
+    }
 }
 
 // ── Role-based access control ─────────────────────────────────────────────────
