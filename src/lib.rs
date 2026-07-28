@@ -3442,6 +3442,31 @@ mod test {
     /// `test_bench_export_footprint_ceiling`.
     const EXPORT_BENCH_SIZES: [u32; 4] = [10, 20, 40, 80];
 
+    /// Labels used by the register budget guard.
+    const REGISTER_BUDGET_BASELINE_LABEL: &str = "baseline";
+    const REGISTER_BUDGET_STRESSED_LABEL: &str = "max_username_len";
+
+    /// Measures a single `register` call against a fresh initialized contract.
+    /// Returns `(cpu_instructions, memory_bytes)`.
+    fn measure_register_cost(github_username: String) -> (u64, u64) {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_default();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), github_username, user).unwrap();
+        });
+
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    fn max_len_username(env: &Env) -> String {
+        let repeated = alloc::string::String::from("a").repeat(MAX_USERNAME_LEN as usize);
+        String::from_str(env, &repeated)
+    }
+
     /// Registers `size` contributors and measures the metered cost of a single
     /// full export. Returns `(cpu_instructions, memory_bytes)`.
     fn measure_export(size: u32) -> (u64, u64) {
@@ -3569,6 +3594,33 @@ mod test {
             large_cpu <= ceiling,
             "export CPU cost grew super-linearly: {large_cpu} at size {large_size} exceeds ceiling {ceiling}"
         );
+    }
+
+    /// Emits register budget samples for CI/Make threshold checks.
+    ///
+    /// Output format (CSV):
+    /// operation,input,cpu_instructions,memory_bytes
+    #[test]
+    fn test_report_register_budget_samples() {
+        let env = Env::default();
+        let baseline = username(&env, "octocat");
+        let stressed = max_len_username(&env);
+
+        let (baseline_cpu, baseline_mem) = measure_register_cost(baseline);
+        let (stressed_cpu, stressed_mem) = measure_register_cost(stressed);
+
+        std::println!("operation,input,cpu_instructions,memory_bytes");
+        std::println!(
+            "register,{},{},{}",
+            REGISTER_BUDGET_BASELINE_LABEL, baseline_cpu, baseline_mem
+        );
+        std::println!(
+            "register,{},{},{}",
+            REGISTER_BUDGET_STRESSED_LABEL, stressed_cpu, stressed_mem
+        );
+
+        assert!(baseline_cpu > 0, "baseline register cost was not metered");
+        assert!(stressed_cpu > 0, "stressed register cost was not metered");
     }
 
     /// Revoking Verifier role prevents further verify calls (Issue #12).
