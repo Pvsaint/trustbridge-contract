@@ -290,6 +290,7 @@ client fails fast instead of on an unexpected ABI. Full walkthrough:
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Testnet/mainnet deployment, env vars, troubleshooting |
 | [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) | Development workflow, PR guidelines, code standards |
 | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and security considerations |
+| [docs/STORAGE_RENT.md](docs/STORAGE_RENT.md) | Storage rent economics, TTL management, keeper checklist |
 
 ---
 

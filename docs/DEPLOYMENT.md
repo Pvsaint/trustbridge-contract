@@ -384,3 +384,29 @@ See [STORAGE_RENT.md](STORAGE_RENT.md) for how simulation fits into the broader 
 4. Schedule TTL extensions for persistent storage entries on long-lived networks
 
 See [SECURITY.md](SECURITY.md) for operational security guidance.
+See [STORAGE_RENT.md](STORAGE_RENT.md) for the full storage rent economics and operator checklist.
+
+---
+
+## Storage Rent and TTL Management
+
+Soroban persistent entries expire if their TTL is not extended.  For ongoing Waves, operators
+must run a **TTL keeper** to prevent cold contributor records from being archived.
+
+### Quick reference
+
+| Action | Command |
+|--------|---------|
+| Check that instance storage is live | `stellar contract invoke … -- get_version` (succeeds = live) |
+| Extend a batch of contributor records | `stellar contract invoke … -- extend_registry_ttl --usernames '[…]'` |
+| Simulate extension cost before paying | Omit `--send=yes` from the above command |
+
+### Wave schedule rule of thumb
+
+Run the keeper at least every **20 days** (two-thirds of the 30-day TTL threshold).
+
+See [STORAGE_RENT.md](STORAGE_RENT.md) for:
+- Instance vs. persistent key breakdown
+- Cost intuition vs. N users (with assumptions labeled)
+- Full operator checklist for Wave timelines
+- Keeper implementation example
