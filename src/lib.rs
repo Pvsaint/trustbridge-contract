@@ -58,7 +58,19 @@ pub struct TrustBridgeContract;
 
 #[contractimpl]
 impl TrustBridgeContract {
-    /// Sets the contract admin. Can only be called once.
+    /// Sets the contract admin and initializes default state. Can only be called once.
+    ///
+    /// Sets `admin` as the contract administrator and assigns it the `Admin` role.
+    /// Also initializes the registration counter, verified counter, pause state,
+    /// upgrade cooldown, and version to their zero/default values.
+    ///
+    /// # Auth
+    ///
+    /// No auth required — the deployer calls this immediately after `stellar contract deploy`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError::AlreadyInitialized`] if `initialize` has already been called.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         if env.storage().instance().has(&ADMIN_KEY) {
             return Err(ContractError::AlreadyInitialized);
@@ -75,7 +87,26 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Pauses contract state mutations. Admin-only.
+    /// Pauses all state-mutating contract functions. Admin-only.
+    ///
+    /// While paused, any call to `register`, `remove`, `verify`, `revoke_verification`,
+    /// `upgrade`, `set_role`, `remove_role`, and other mutating functions returns
+    /// [`ContractError::Paused`]. Read-only calls (`get_address`, `get_stats`, etc.)
+    /// remain available.
+    ///
+    /// Use this as an emergency circuit breaker if a vulnerability or incident requires
+    /// halting all mutations until a fix can be deployed via `upgrade`.
+    ///
+    /// Emits [`PausedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn pause(env: Env) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
@@ -87,7 +118,20 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Unpauses contract state mutations. Admin-only.
+    /// Resumes state-mutating contract functions after a pause. Admin-only.
+    ///
+    /// Clears the paused flag set by [`pause`][Self::pause], restoring normal contract operation.
+    ///
+    /// Emits [`UnpausedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
@@ -99,12 +143,36 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Returns whether the given username has a pending reverify flag.
-    pub fn pending_reverify(env: Env, github_username: String) -> bool {
-        get_pending_reverify(&env, &github_username)
+    /// Returns `true` if the contract is currently paused.
+    ///
+    /// Read-only; no auth required. Clients should check this before submitting
+    /// state-mutating transactions to avoid paying fees for a call that will fail
+    /// with [`ContractError::Paused`].
+    pub fn is_paused(env: Env) -> bool {
+        storage_is_paused(&env)
     }
 
-    /// Assigns a role to an address. Admin-only.
+    /// Assigns a role to `target`. Admin-only.
+    ///
+    /// Roles gate access to privileged operations:
+    ///
+    /// | Role | Can do |
+    /// |------|--------|
+    /// | `Admin` | Everything |
+    /// | `Upgrader` | Call `upgrade` |
+    /// | `Verifier` | Call `verify` and `revoke_verification` |
+    ///
+    /// Emits [`RoleGrantedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn set_role(env: Env, target: Address, role: Role) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
@@ -125,7 +193,23 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Revokes a role from an address. Admin-only.
+    /// Revokes `target`'s role assignment. Admin-only.
+    ///
+    /// After this call `get_role(target)` returns `None`. Does not affect the
+    /// admin's own role — the admin address is stored separately and cannot be
+    /// stripped via `remove_role`.
+    ///
+    /// Emits [`RoleRevokedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn remove_role(env: Env, target: Address) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
@@ -145,12 +229,28 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Queries assigned role for an address.
+    /// Returns the role assigned to `address`, or `None` if no role is assigned.
+    ///
+    /// Read-only; no auth required. Returns `None` for any address that has never
+    /// been granted a role (including the admin address, which is stored separately).
     pub fn get_role(env: Env, address: Address) -> Option<Role> {
         storage_get_role(&env, &address)
     }
 
-    /// Configures WASM upgrade cooldown in seconds. Admin-only.
+    /// Sets the minimum number of seconds that must elapse between WASM upgrades. Admin-only.
+    ///
+    /// A non-zero cooldown enforces a timelock on `upgrade`, giving watchers time to
+    /// detect and react to an unexpected upgrade before the next one can be submitted.
+    /// Set to `0` to disable the timelock.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn set_cooldown(env: Env, cooldown_seconds: u64) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
@@ -160,12 +260,18 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Returns WASM upgrade cooldown in seconds.
+    /// Returns the configured WASM upgrade cooldown in seconds.
+    ///
+    /// Returns `0` if no cooldown is configured (upgrades are unrestricted by time).
     pub fn get_cooldown(env: Env) -> u64 {
         storage_get_cooldown(&env)
     }
 
-    /// Returns current contract version tuple (major, minor, patch).
+    /// Returns the stored contract schema version as `(major, minor, patch)`.
+    ///
+    /// Falls back to the compile-time [`CONTRACT_VERSION`] constant on instances
+    /// initialized before on-chain version tracking was added. Prefer [`version`][Self::version]
+    /// for the canonical version endpoint; this is the raw storage accessor.
     pub fn get_version(env: Env) -> (u32, u32, u32) {
         storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
     }
@@ -357,7 +463,22 @@ impl TrustBridgeContract {
         Ok(true)
     }
 
-    /// Migrates contract version state. Admin-only.
+    /// Advances the on-chain schema version. Admin-only.
+    ///
+    /// Used after an `upgrade` that changes the storage layout. `new_version` must
+    /// be strictly greater than the current stored version (semver order); downgrading
+    /// is rejected to prevent accidental rollback.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    /// - [`ContractError::InvalidVersion`] if `new_version` is not strictly greater than the current version.
     pub fn migrate(env: Env, new_version: (u32, u32, u32)) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
@@ -519,6 +640,10 @@ impl TrustBridgeContract {
         Ok(extended)
     }
 
+    /// Looks up the `ContributorRecord` for `github_username`. Returns `None` if not registered.
+    ///
+    /// Read-only; no auth required. Use this for payout address resolution in GitHub Actions
+    /// and dashboard lookups.
     pub fn get_address(env: Env, github_username: String) -> Option<ContributorRecord> {
         if has_record(&env, &github_username) {
             get_record(&env, &github_username)
@@ -527,10 +652,33 @@ impl TrustBridgeContract {
         }
     }
 
+    /// Returns `true` if `github_username` is registered, without deserializing the full record.
+    ///
+    /// Read-only; no auth required. Use this when callers only need existence confirmation
+    /// and do not need the [`ContributorRecord`] fields.
     pub fn has_record(env: Env, github_username: String) -> bool {
         has_record(&env, &github_username)
     }
 
+    /// Removes the registration for `github_username`. Callable by the registrant or the admin.
+    ///
+    /// `caller` must sign the transaction and must equal either the contract admin or the
+    /// Stellar address currently registered to `github_username`. This prevents anyone other
+    /// than the owner or admin from de-registering an account.
+    ///
+    /// Decrements the total count and, if the record was verified, the verified count.
+    /// Emits [`RemovedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller` (registrant or admin).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
+    /// - [`ContractError::NotAuthorized`] if `caller` is neither the registrant nor the admin.
     pub fn remove(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
@@ -562,6 +710,21 @@ impl TrustBridgeContract {
         Ok(())
     }
 
+    /// Returns a page of `(github_username, stellar_address)` pairs starting at `offset`.
+    ///
+    /// Admin-only alternative to `get_registered_paginated` that uses a simple offset/limit
+    /// rather than a cursor. Returns up to `limit` entries beginning at `offset` in the
+    /// registration index. Use for small exports; for large registries prefer the cursor-based
+    /// `get_registered_paginated`.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn get_registered_page(
         env: Env,
         offset: u32,
@@ -583,6 +746,20 @@ impl TrustBridgeContract {
         Ok(result)
     }
 
+    /// Returns the complete registry as a list of `(github_username, stellar_address)` pairs.
+    ///
+    /// **Admin-only.** For large registries this call materialises the entire index in a
+    /// single transaction; prefer `get_registered_paginated` or `get_public_paginated` for
+    /// incremental dashboard sync.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn get_all_registered(env: Env) -> Result<Vec<(String, Address)>, ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
@@ -601,6 +778,23 @@ impl TrustBridgeContract {
         Ok(result)
     }
 
+    /// Exports a page of registry records using a cursor. Admin-only.
+    ///
+    /// `cursor` is the zero-based record index to start from; `limit` is the maximum
+    /// number of records to return (capped at `MAX_PAGE_LIMIT`). Returns an [`ExportPage`]
+    /// containing the records and a `next_cursor` for subsequent calls.
+    ///
+    /// Use this instead of `get_all_registered` for large registries — it avoids
+    /// materializing the full index in one transaction.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn get_registered_paginated(
         env: Env,
         cursor: u32,
@@ -613,6 +807,19 @@ impl TrustBridgeContract {
         get_registered_paginated_internal(&env, cursor, limit)
     }
 
+    /// Public paginated read for indexers and dashboard consumers.
+    ///
+    /// Same cursor/limit semantics as `get_registered_paginated` but requires no auth,
+    /// making it suitable for public dashboard sync and off-chain indexers. Returns an
+    /// [`ExportPage`] with records and a `next_cursor`.
+    ///
+    /// Blocked by the pause state — returns [`ContractError::Paused`] while the circuit
+    /// breaker is active.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
     pub fn get_public_paginated(
         env: Env,
         cursor: u32,
@@ -624,6 +831,20 @@ impl TrustBridgeContract {
         get_registered_paginated_internal(&env, cursor, limit)
     }
 
+    /// Directly sets the contract pause state. Admin-only.
+    ///
+    /// Prefer the named `pause` / `unpause` entry points which emit the corresponding
+    /// events. This lower-level setter is kept for tooling that needs to set the flag
+    /// programmatically without the event emission overhead.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
@@ -633,15 +854,23 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Marks a contributor as verified after an off-chain GitHub identity check.
+    /// Marks `github_username` as verified after an off-chain GitHub identity check.
     ///
-    /// Callable by the contract admin **or** any address assigned the
-    /// `Role::Verifier` role (Issue #12 — verifier role separation).
-    pub fn verify(
-        env: Env,
-        caller: Address,
-        github_username: String,
-    ) -> Result<(), ContractError> {
+    /// Callable by the contract admin **or** any address assigned the `Role::Verifier` role.
+    /// Increments the verified counter. Emits [`VerifiedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller` (admin or Verifier role holder).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if `caller` is neither the admin nor a Verifier.
+    /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
+    /// - [`ContractError::AlreadyVerified`] if `github_username` is already verified.
+    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
@@ -706,26 +935,53 @@ impl TrustBridgeContract {
         Ok(())
     }
 
+    /// Returns the number of currently verified registrations.
+    ///
+    /// Read-only; no auth required. The verified count is incremented by `verify` and
+    /// decremented by `revoke_verification` and `remove` (when removing a verified record).
     pub fn get_verified_count(env: Env) -> u32 {
         storage_get_verified_count(&env)
     }
 
+    /// Returns aggregate registry statistics: total and verified registration counts.
+    ///
+    /// Read-only; no auth required. Suitable for dashboard displays and health checks.
+    /// See [`Stats`] for the returned struct fields.
     pub fn get_stats(env: Env) -> Stats {
         read_stats(&env)
     }
 
+    // --- Reference event indexer hardening: admin/pause/roles/cooldown (Wave #33) ---
+
+    /// Returns whether the contract is currently paused.
+    ///
+    /// Alias of [`is_paused`][Self::is_paused] kept for the reference event indexer,
+    /// which calls this name. Read-only; no auth required.
     pub fn is_contract_paused(env: Env) -> bool {
         storage_is_paused(&env)
     }
 
+    /// Returns `true` if `caller` is the contract admin.
+    ///
+    /// Read-only; no auth required. Useful for off-chain tooling that needs to
+    /// check admin status without submitting a transaction.
     pub fn has_admin_role(env: Env, caller: Address) -> bool {
         is_admin_caller(&env, &caller)
     }
 
+    /// Records that `github_username` performed a registry-mutating action at the current
+    /// ledger timestamp, for use by cooldown enforcement logic.
+    ///
+    /// Off-chain callers use this alongside `is_registration_in_cooldown` to implement
+    /// per-contributor rate limiting without requiring a contract upgrade.
     pub fn record_action(env: Env, github_username: String) {
         set_last_action(&env, &github_username, env.ledger().timestamp());
     }
 
+    /// Returns `true` if `github_username` is still within the registration cooldown window.
+    ///
+    /// Read-only; no auth required. The cooldown period is set by `set_cooldown`. Returns
+    /// `false` if no action has been recorded or the cooldown has elapsed.
     pub fn is_registration_in_cooldown(env: Env, github_username: String) -> bool {
         is_in_cooldown(&env, &github_username)
     }

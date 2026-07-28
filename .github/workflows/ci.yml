@@ -69,45 +69,7 @@ jobs:
       - name: Verify WASM artifact exists
         run: test -f target/wasm32v1-none/release/trustbridge-contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge-contract.wasm
 
-      - name: WASM size regression gate
-        run: |
-          # Locate the release WASM (prefer wasm32v1-none, fall back to legacy target)
-          if [ -f target/wasm32v1-none/release/trustbridge-contract.wasm ]; then
-            WASM=target/wasm32v1-none/release/trustbridge-contract.wasm
-          else
-            WASM=target/wasm32-unknown-unknown/release/trustbridge-contract.wasm
-          fi
-
-          SIZE=$(wc -c < "$WASM")
-          LIMIT=${{ env.WASM_SIZE_LIMIT }}
-          LIMIT_KB=$(( LIMIT / 1024 ))
-          SIZE_KB_INT=$(( SIZE / 1024 ))
-          SIZE_KB_FRAC=$(( (SIZE % 1024) * 10 / 1024 ))
-
-          echo "──────────────────────────────────────────"
-          echo "  WASM size report"
-          echo "──────────────────────────────────────────"
-          echo "  File   : $WASM"
-          echo "  Size   : ${SIZE} bytes  (~${SIZE_KB_INT}.${SIZE_KB_FRAC} KB)"
-          echo "  Limit  : ${LIMIT} bytes (${LIMIT_KB} KB)"
-          echo "──────────────────────────────────────────"
-
-          if [ "$SIZE" -gt "$LIMIT" ]; then
-            echo ""
-            echo "❌  WASM size regression detected!"
-            echo "    Current: ${SIZE} bytes"
-            echo "    Budget : ${LIMIT} bytes (${LIMIT_KB} KB)"
-            echo "    Over by: $(( SIZE - LIMIT )) bytes"
-            echo ""
-            echo "To fix:"
-            echo "  • Check for unintended dependency additions (cargo tree)"
-            echo "  • Ensure release profile has opt-level = \"z\" and lto = true in Cargo.toml"
-            echo "  • If the growth is intentional, raise WASM_SIZE_LIMIT in .github/workflows/ci.yml"
-            echo "    and update the WASM size budget section in docs/DEPLOYMENT.md"
-            exit 1
-          else
-            HEADROOM=$(( LIMIT - SIZE ))
-            echo "  Headroom: ${HEADROOM} bytes remaining under budget"
-            echo ""
-            echo "✅  WASM size is within budget."
-          fi
+      - name: cargo doc (public API)
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

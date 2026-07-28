@@ -73,6 +73,58 @@ This runs formatting, clippy, tests, and contract build — the same checks as C
 - Update [ARCHITECTURE.md](ARCHITECTURE.md) for storage or auth model changes
 - Update [README.md](../README.md) if user-facing behavior changes
 
+### Rustdoc
+
+Every public function and type in `src/` that integrators interact with must have a rustdoc summary.
+Follow these conventions:
+
+- **One-line summary** first (sentence ending in `.`), then a blank line, then optional detail.
+- **`# Auth`** section on any function that calls `require_auth()` — state exactly which identity must sign.
+- **`# Errors`** section on every `Result`-returning function — list each `ContractError` variant that can be returned and when.
+- Keep docs short and factual. Do not duplicate examples from [ABI.md](ABI.md).
+
+Example:
+
+```rust
+/// Registers or updates a GitHub username → Stellar address mapping.
+///
+/// # Auth
+///
+/// Requires auth from `stellar_address`.
+///
+/// # Errors
+///
+/// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+/// - [`ContractError::Paused`] if the contract is paused.
+/// - [`ContractError::InvalidUsername`] if the username fails validation.
+pub fn register(env: Env, github_username: String, stellar_address: Address) -> Result<(), ContractError> {
+```
+
+#### Building the docs locally
+
+```bash
+# Open in browser (recommended for contributors)
+cargo doc --no-deps --open
+
+# Build only, no browser (useful in CI or headless environments)
+cargo doc --no-deps
+```
+
+Docs are generated into `target/doc/trustbridge_contract/`. The `--no-deps` flag
+skips dependencies and keeps the output focused on the contract's own API.
+
+To also include private items (useful when exploring internals):
+
+```bash
+cargo doc --no-deps --document-private-items --open
+```
+
+#### CI doc build
+
+`cargo doc --no-deps` runs as part of the CI quality gate. A doc build failure
+(broken intra-doc links, missing `# Errors` on `Result` functions, etc.) blocks
+merge just like a test failure.
+
 ### Commit Messages
 
 Use clear, imperative subjects:
