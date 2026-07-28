@@ -19,7 +19,7 @@ MAX_USERNAME_BENCH_OUT ?= bench-max-username-register.txt
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 
-.PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-max-username fmt lint check ci clean \
+.PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean wasm-size \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         simulate-pause-flow
@@ -63,9 +63,45 @@ fmt: ## Check formatting
 lint: ## Run clippy
 	cargo clippy --all-targets -- -D warnings
 
-check: fmt lint test build ## Run full local quality gate
+# ── WASM size budget ─────────────────────────────────────────────────────────
+# Hard limit in bytes. Must match WASM_SIZE_LIMIT in .github/workflows/ci.yml.
+# Raise it here and in CI together when intentional feature growth exceeds it.
+# See docs/DEPLOYMENT.md §"WASM Size Budget" for guidance.
+WASM_SIZE_LIMIT ?= 204800
 
-ci: check ## Alias for CI-equivalent checks
+wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE_LIMIT)
+	@if [ -f $(WASM_V1) ]; then \
+		WASM=$(WASM_V1); \
+	elif [ -f $(WASM_LEGACY) ]; then \
+		WASM=$(WASM_LEGACY); \
+	else \
+		echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; \
+	fi; \
+	SIZE=$$(wc -c < "$$WASM"); \
+	LIMIT=$(WASM_SIZE_LIMIT); \
+	LIMIT_KB=$$(( LIMIT / 1024 )); \
+	SIZE_KB=$$(( SIZE / 1024 )); \
+	echo "──────────────────────────────────────────"; \
+	echo "  WASM size report"; \
+	echo "──────────────────────────────────────────"; \
+	echo "  File   : $$WASM"; \
+	echo "  Size   : $$SIZE bytes (~$${SIZE_KB} KB)"; \
+	echo "  Limit  : $$LIMIT bytes ($${LIMIT_KB} KB)"; \
+	echo "──────────────────────────────────────────"; \
+	if [ "$$SIZE" -gt "$$LIMIT" ]; then \
+		echo ""; \
+		echo "FAIL: WASM size $$SIZE bytes exceeds budget $$LIMIT bytes (over by $$(( SIZE - LIMIT )) bytes)"; \
+		echo "Raise WASM_SIZE_LIMIT in Makefile and .github/workflows/ci.yml if growth is intentional."; \
+		exit 1; \
+	else \
+		echo "  Headroom: $$(( LIMIT - SIZE )) bytes remaining"; \
+		echo ""; \
+		echo "PASS: WASM size is within budget."; \
+	fi
+
+check: fmt lint test build wasm-size ## Run full local quality gate
+
+ci: check ## Alias for CI-equivalent checks (fmt + lint + test + build + wasm-size)
 
 clean: ## Remove build artifacts
 	cargo clean
