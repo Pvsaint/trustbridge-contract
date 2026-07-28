@@ -30,7 +30,28 @@ pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
 pub const PROV_KEY: Symbol = symbol_short!("prov");
 pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
-// ── TTL constants (ledger-based, ~7 days at 5 s/ledger) ─────────────────────
+/// Key for the version stored at `storage::get_version` / `set_version`.
+/// Aliased as VERSION_KEY for callers that use that name.
+pub const VERSION_KEY: Symbol = VER_KEY;
+
+// ── Pagination constants ─────────────────────────────────────────────────────
+
+pub const DEFAULT_PAGE_LIMIT: u32 = 20;
+pub const MAX_PAGE_LIMIT: u32 = 100;
+
+// ── Chunked-index constants ──────────────────────────────────────────────────
+
+/// Maximum number of usernames per chunk slice.
+pub const CHUNK_SIZE: u32 = 50;
+
+// ─── TTL policy (Wave #7) ────────────────────────────────────────────────────
+//
+// Soroban persistent entries expire and are archived unless their TTL is
+// extended. `get_record` and `set_record` already call `extend_ttl` with the two
+// constants below, but neither was ever defined — so the TTL policy this
+// contract claims to have had no actual values behind it.
+//
+// Stellar closes a ledger roughly every 5 seconds, so ~17,280 ledgers is a day.
 
 /// Ledgers per day at the ~5s close time, used to express the policy in days.
 pub const LEDGERS_PER_DAY: u32 = 17_280;
@@ -106,7 +127,7 @@ pub struct WasmProvenance {
     /// Ledger timestamp the upgrade was applied.
     pub upgraded_at: u64,
     /// Contract version recorded at upgrade time.
-    pub version: (u32, u32, u32),
+    pub version: Option<(u32, u32, u32)>,
     /// Whether the hash had been attested before it was applied.
     pub attested: bool,
 }
@@ -622,7 +643,15 @@ pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
     matches!(get_admin(env), Ok(admin) if admin == *address)
 }
 
-/// True when `address` is the contract admin or holds `expected_role`.
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VER_KEY)
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
+}
+
+#[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.
 pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
     if let Ok(admin) = get_admin(env) {
         if *address == admin {

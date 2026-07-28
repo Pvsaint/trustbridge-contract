@@ -29,7 +29,7 @@ use crate::storage::{
     remove_role as storage_remove_role, require_initialized, require_not_paused,
     set_cooldown as storage_set_cooldown, set_count, set_last_action,
     set_paused as set_paused_state, set_record, set_role as storage_set_role, set_verified_count,
-    set_version, ADMIN_KEY,
+    set_version, has_role_or_admin, ADMIN_KEY,
 };
 use crate::utils::{is_valid_github_username};
 
@@ -352,36 +352,12 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Configures Verification defaults (attestation, expiry, quorum).
-    /// Implements double-initialize rejection specific to this feature area (Wave #54).
-    pub fn config_verification(
+    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
+    pub fn verify(
         env: Env,
         caller: Address,
-        attestation: Symbol,
-        expiry: u64,
-        quorum: u32,
+        github_username: String,
     ) -> Result<(), ContractError> {
-        require_initialized(&env)?;
-        require_not_paused(&env)?;
-
-        caller.require_auth();
-
-        if !is_admin_caller(&env, &caller) {
-            return Err(ContractError::NotAuthorized);
-        }
-
-        const CONFIG_KEY: Symbol = Symbol::short("VER_CONF");
-        if env.storage().instance().has(&CONFIG_KEY) {
-            return Err(ContractError::AlreadyInitialized);
-        }
-
-        env.storage().instance().set(&CONFIG_KEY, &(attestation, expiry, quorum));
-        Ok(())
-    }
-
-    /// Marks a contributor as verified after an off-chain GitHub identity check. 
-    /// Verifier/Admin only.
-    pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 

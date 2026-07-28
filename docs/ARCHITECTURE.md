@@ -47,6 +47,7 @@ Consumers:
 | `Symbol("count")` | `u32` | Total active registrations |
 | `Symbol("vcount")` | `u32` | Count of verified registrations |
 | `Symbol("idx")` | `Vec<String>` | Ordered list of registered usernames (for admin export) |
+| `Symbol("ver")` | `(u32, u32, u32)` | Contract schema version tuple |
 
 ### Persistent Storage (per-entry, TTL-extended)
 
@@ -69,6 +70,7 @@ pub struct ContributorRecord {
 - **`idx` index:** Soroban does not support iterating arbitrary storage keys. The username index enables `get_all_registered()` without scanning the entire ledger.
 - **`vcount` counter:** Maintained incrementally so `get_stats()` is O(1) rather than scanning all records.
 - **Re-registration:** Updating an existing username overwrites the record. If the Stellar address changes, `verified` resets to `false` unless the address is unchanged.
+- **Schema Versioning:** The `migration_version` stored at `Symbol("ver")` is a `(u32, u32, u32)` tuple representing the deployed contract's schema version. Fresh deployments default to the build constant (`1.0.0`) on initialization. Upgrades to new version schemas require the admin to explicitly invoke the `migrate` function on-chain.
 
 ---
 

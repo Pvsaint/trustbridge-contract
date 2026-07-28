@@ -74,33 +74,33 @@ Recommendations:
 
 ---
 
-## Re-registration After Remove
+## Username Squatting Mitigations
 
-Stale storage after `remove` is a security smell: a new registrant must not
-inherit the previous owner's verified status or address binding (Issue #93).
+Because Soroban handles GitHub registrations permissionlessly (first-come, first-registered), there is a risk of username squatting (someone registering another contributor's GitHub username to redirect their rewards). TrustBridge uses a multi-layered security model to mitigate this risk.
 
-`remove` clears the stored record entirely — it does not leave a tombstone.
-Consequently, registering a username that was previously removed is
-indistinguishable on-chain from registering it for the first time:
+### 1. Mandatory Admin Verification Gate
+Registration alone does **not** grant payout readiness. Payout systems and the TrustBridge dashboard require a contributor record to be **verified** before rewards can be disbursed.
+- Verification is performed by the contract admin or a designated verifier after confirming ownership of the GitHub account off-chain (e.g., via OAuth or a cryptographic proof).
+- The verifier validates that the registered Stellar address matches the authenticated GitHub user.
+- If a squatter registers a name, they cannot pass this verification gate since they cannot prove ownership of the corresponding GitHub account.
 
-- `registered_at` is set to the current ledger timestamp — nothing carries
-  over from the removed record.
-- `verified` starts `false` regardless of whether the removed record was
-  verified. The admin (or a `Verifier`-role holder) must verify the new
-  registration independently; no prior verification is honored.
-- The new registration binds to whichever Stellar address signs the
-  `register` call — it need not be, and is not required to relate to, the
-  address that was removed.
-- This holds for **both** removal paths: a self-remove by the registrant and
-  an admin-initiated remove authorize the same clearing behavior, since
-  `remove` does not distinguish who triggered it once the record is gone.
-- Removing a username that was never registered (or already removed) fails
-  with `NotRegistered` and mutates nothing — there is no stale state for a
-  negative case to leak.
+### 2. Double-Auth Transfer Protection (Self-Auth)
+If a user registers a username and later needs to transfer it to a different Stellar address, the contract requires **both** of the following to authorize the transaction:
+1. The new Stellar address.
+2. The currently registered Stellar address.
+This prevents a third party from maliciously taking over a registered username.
 
-Covered by `test_self_remove_then_reregister_new_address_requires_reverification`,
-`test_admin_remove_then_reregister_new_address_requires_reverification`, and
-`test_remove_unknown_username_returns_not_registered` in `src/lib.rs`.
+### 3. Contributor Dispute & Resolution Flow
+If a rightful owner discovers that their GitHub username has been squatted on-chain:
+1. **Report**: The owner reports the dispute to the TrustBridge administrators (off-chain).
+2. **Revocation/Removal**: The admin verifies the owner's identity, then calls `remove` to delete the squatter's record from the contract registry.
+3. **Re-registration**: The rightful owner registers their correct Stellar address.
+4. **Re-verification**: The admin verifies the new record.
+
+### FAQ: "Someone registered my GitHub name, what should I do?"
+- **Will they receive my payouts?** No. Payouts require the record to be verified. The squatter cannot pass the admin verification check.
+- **How do I reclaim my username?** Open a support ticket / dispute with the TrustBridge administrators. They will remove the squatter's record so you can register your address.
+- **Does the contract verify my GitHub handle automatically?** No. There is **no on-chain verification proof** of GitHub identity at registration time. Verification is entirely off-chain/administrative.
 
 ---
 
