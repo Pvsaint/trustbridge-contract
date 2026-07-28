@@ -249,6 +249,16 @@ and decrements `verified` only when that removed record was verified. Removing
 an unverified record while another verified record remains must leave
 `verified` unchanged; this is covered by the Wave #46 regression test.
 
+Empty-registry invariant (Issue #92): removing the **last** registered
+contributor returns the registry to a clean empty state — `get_stats()`
+reports `{total: 0, verified: 0}`, the username index is empty
+(`get_all_registered`, `get_registered_page`, and the paginated export paths
+all return zero records with `has_more: false`), and every lookup
+(`get_address`, `has_record`) reports absence. No stale index entry or
+non-zero counter survives. A subsequent registration on the now-empty
+registry proceeds exactly as it would on a never-used one. Covered by
+`test_remove_last_user_returns_registry_to_empty_state` in `src/lib.rs`.
+
 ---
 
 ### `get_all_registered() -> Result<Vec<(String, Address)>, ContractError>`
@@ -268,7 +278,7 @@ stellar contract invoke --id $ID --source admin --network testnet \
 
 ---
 
-### `verify(github_username: String) -> Result<(), ContractError>`
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
 
@@ -339,7 +349,7 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 
 ---
 
-### `revoke_verification(github_username: String) -> Result<(), ContractError>`
+### `revoke_verification(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Revoke verification for a registered contributor.
 
@@ -375,6 +385,15 @@ Returns the number of verified registrations.
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+**Parity invariant (Issue #90):** `get_verified_count()` always equals
+`get_stats().verified`, and both always equal the number of stored records
+with `verified == true`. This holds after every path that touches
+verification state — `register` (including an address-change re-register),
+`verify`, `revoke_verification`, and `remove` — including on an empty
+registry and across repeated verify/revoke cycles. See
+[REGISTRY_INVARIANTS.md#verification](REGISTRY_INVARIANTS.md#verification)
+and `test_verified_count_parity_across_all_mutation_paths` in `src/lib.rs`.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet \
@@ -728,8 +747,9 @@ benchmark suite lives with the unit tests in `src/lib.rs` under the
 `env.cost_estimate().budget()`.
 
 ```bash
-make bench            # print CPU/memory cost for every benchmarked operation
-make bench-export     # export-only run, results written to bench-results.txt
+make bench              # print CPU/memory cost for every benchmarked operation
+make bench-export       # export-only run, results written to bench-results.txt
+make bench-max-username # register at the max-length username, written to bench-max-username-register.txt
 ```
 
 Output is CSV so it can be diffed between branches:
@@ -750,6 +770,7 @@ get_all_registered,100,...,...
 | `test_bench_username_case_normalization` | `usernames_match` at 10, 50, 100, 200 comparisons (`make bench-username`) |
 | `test_bench_core_operation_cpu_cost` | `register`, `get_address`, `get_stats` |
 | `test_bench_failure_path_costs_less_than_success` | Rejected `verify` versus accepted `verify` |
+| `test_bench_max_length_username_register` | `register` at a 1-character username versus the maximum accepted length (`MAX_USERNAME_LEN`, currently 39 — read `max_username_len()` rather than hardcoding it) (`make bench-max-username`, Issue #91) |
 
 ### Regression guards
 
@@ -767,6 +788,27 @@ asserts on shape rather than fixed numbers:
   here.
 - A rejected call costs **strictly less** than the equivalent accepted call, so
   a missing-username lookup cannot become a cheap way to burn ledger budget.
+- The max-length username register costs **at least as much** as a
+  1-character register, and no more than **5x** that baseline. `register`'s
+  extra work for a longer username is a fixed-size copy into the 39-byte
+  validation buffer, not a nested or per-character scan, so a wide gap over
+  the baseline signals a complexity regression rather than expected growth.
+  Since `MAX_USERNAME_LEN` (39) is pinned by an assertion in
+  `test_bench_max_length_username_register`, an incompatible change to the
+  username length policy fails the benchmark outright instead of silently
+  benchmarking a username that no longer represents the worst case.
+
+### Max-length username register — expected range (Issue #91)
+
+`make bench-max-username` prints one CSV line for a 1-character register and
+one for a 39-character (`MAX_USERNAME_LEN`) register. As with the other
+benchmarks, absolute instruction counts drift between `soroban-sdk` releases —
+what matters is the **ratio** between the two lines, which the test enforces
+must stay within 5x. Re-run after any change to `register`, `is_valid_github_username`,
+or the storage/index write path, and compare the new ratio against the
+previous CSV output committed alongside the change (or against
+`bench-max-username-register.txt` from the prior run) to catch a regression
+before it reaches testnet.
 
 ### Caveats
 

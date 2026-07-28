@@ -18,6 +18,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Double initialization | `AlreadyInitialized` error |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
+| Stale trust surviving a remove → re-register cycle (a new registrant inheriting the previous owner's verified status or address binding) | `remove` unconditionally clears the stored record; `register` on a removed username always starts a fresh, unverified record — see [Re-registration After Remove](#re-registration-after-remove) (Issue #93) |
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
 
 ### Out of Scope (handled off-chain)
@@ -50,6 +51,36 @@ The admin address is **immutable** after `initialize`. Recommendations:
   re-registered to a different Stellar address, the record becomes unverified,
   the verified count decreases, and any later `verify()` applies to the new
   address only.
+
+---
+
+## Re-registration After Remove
+
+Stale storage after `remove` is a security smell: a new registrant must not
+inherit the previous owner's verified status or address binding (Issue #93).
+
+`remove` clears the stored record entirely — it does not leave a tombstone.
+Consequently, registering a username that was previously removed is
+indistinguishable on-chain from registering it for the first time:
+
+- `registered_at` is set to the current ledger timestamp — nothing carries
+  over from the removed record.
+- `verified` starts `false` regardless of whether the removed record was
+  verified. The admin (or a `Verifier`-role holder) must verify the new
+  registration independently; no prior verification is honored.
+- The new registration binds to whichever Stellar address signs the
+  `register` call — it need not be, and is not required to relate to, the
+  address that was removed.
+- This holds for **both** removal paths: a self-remove by the registrant and
+  an admin-initiated remove authorize the same clearing behavior, since
+  `remove` does not distinguish who triggered it once the record is gone.
+- Removing a username that was never registered (or already removed) fails
+  with `NotRegistered` and mutates nothing — there is no stale state for a
+  negative case to leak.
+
+Covered by `test_self_remove_then_reregister_new_address_requires_reverification`,
+`test_admin_remove_then_reregister_new_address_requires_reverification`, and
+`test_remove_unknown_username_returns_not_registered` in `src/lib.rs`.
 
 ---
 

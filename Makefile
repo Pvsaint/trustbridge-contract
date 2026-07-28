@@ -15,10 +15,11 @@ GITHUB_USER ?=
 STELLAR_ADDR ?=
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
+MAX_USERNAME_BENCH_OUT ?= bench-max-username-register.txt
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 
-.PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean \
+.PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-max-username fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
 
@@ -50,6 +51,10 @@ bench-export: ## Write export CPU benchmark results to $(BENCH_OUT)
 bench-username: ## Write username case-normalization benchmark results to $(NORM_BENCH_OUT)
 	cargo test test_bench_username_case_normalization -- --nocapture --test-threads=1 | tee $(NORM_BENCH_OUT)
 	@echo "Benchmark results written to $(NORM_BENCH_OUT)"
+
+bench-max-username: ## Write max-length (39-char) username register benchmark results to $(MAX_USERNAME_BENCH_OUT)
+	cargo test test_bench_max_length_username_register -- --nocapture --test-threads=1 | tee $(MAX_USERNAME_BENCH_OUT)
+	@echo "Benchmark results written to $(MAX_USERNAME_BENCH_OUT)"
 
 fmt: ## Check formatting
 	cargo fmt --all -- --check

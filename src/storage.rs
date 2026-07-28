@@ -340,6 +340,16 @@ pub fn add_to_index(env: &Env, github_username: &String) {
     }
 }
 
+/// Removes `github_username` from both the legacy flat index and the chunked
+/// index.
+///
+/// Empty-registry invariant (Issue #92): removing the last remaining entry
+/// must leave the legacy index at length 0 and the chunk that held it empty,
+/// not a stale hole — `get_all_registered`, `get_index_page`, and the export
+/// paths must all observe a clean empty registry afterward, and a subsequent
+/// registration must proceed exactly as it would on a never-used registry.
+/// Covered by `test_remove_last_user_returns_registry_to_empty_state` in
+/// `src/lib.rs`.
 pub fn remove_from_index(env: &Env, github_username: &String) {
     // 1. Legacy index update
     let index = get_index(env);

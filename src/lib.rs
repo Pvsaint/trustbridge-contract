@@ -23,7 +23,8 @@ use crate::storage::{
     add_to_index, get_admin, get_cooldown as storage_get_cooldown, get_count, get_index,
     get_last_upgrade, get_record, get_registered_paginated_internal, get_role as storage_get_role,
     get_stats as read_stats, get_verified_count as storage_get_verified_count,
-    get_version as storage_get_version, has_record, is_admin_caller, is_in_cooldown,
+    get_version as storage_get_version, has_record, has_role_or_admin, is_admin_caller,
+    is_in_cooldown,
     is_paused as storage_is_paused, remove_from_index, remove_record,
     remove_role as storage_remove_role, require_initialized, require_not_paused,
     set_cooldown as storage_set_cooldown, set_count, set_last_action, set_last_upgrade,
@@ -645,8 +646,11 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
-    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
+    /// Marks a contributor as verified after an off-chain GitHub identity check.
+    ///
+    /// Callable by the contract admin **or** any address assigned the
+    /// `Role::Verifier` role (Issue #12 — verifier role separation).
+    pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
@@ -784,6 +788,22 @@ mod test {
 
     fn username(env: &Env, name: &str) -> String {
         String::from_str(env, name)
+    }
+
+    /// Asserts `get_verified_count()` and `get_stats().verified` agree on
+    /// `expected` (Issue #90). Both APIs are checked together so future
+    /// mutation paths cannot let the two counters drift apart silently.
+    fn assert_verified_parity(env: &Env, expected: u32) {
+        assert_eq!(
+            TrustBridgeContract::get_verified_count(env.clone()),
+            expected,
+            "get_verified_count() diverged from the expected verified count"
+        );
+        assert_eq!(
+            TrustBridgeContract::get_stats(env.clone()).verified,
+            expected,
+            "get_stats().verified diverged from the expected verified count"
+        );
     }
 
     // ── Basic registration / lookup ──────────────────────────────────────────
@@ -2587,5 +2607,259 @@ mod test {
             let _ = target;
             assert_eq!(TrustBridgeContract::get_role(env.clone(), verifier.clone()), Some(Role::Verifier));
         });
+    }
+
+    // ── Issue #90: get_verified_count() / get_stats().verified parity ────────
+
+    /// `get_verified_count()` and `get_stats().verified` must never diverge,
+    /// across every path that touches verification state: register, verify,
+    /// revoke_verification, address-change re-register, and remove — plus the
+    /// empty registry and a re-verify cycle (Issue #90).
+    #[test]
+    fn test_verified_count_parity_across_all_mutation_paths() {
+        let env = Env::default();
+        let (admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            // Empty registry.
+            assert_verified_parity(&env, 0);
+
+            // register: a fresh, unverified registration does not move the count.
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            assert_verified_parity(&env, 0);
+
+            // verify.
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            assert_verified_parity(&env, 1);
+
+            // revoke_verification.
+            TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            assert_verified_parity(&env, 0);
+
+            // Re-verify cycle.
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            assert_verified_parity(&env, 1);
+
+            // Address-change re-register clears verification.
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone()).unwrap();
+            assert_verified_parity(&env, 0);
+
+            // Verify the new address, then remove the verified record.
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            assert_verified_parity(&env, 1);
+            TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat")).unwrap();
+            assert_verified_parity(&env, 0);
+
+            // Removing an unverified record must leave an unrelated verified
+            // record's count untouched.
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), other.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "bob")).unwrap();
+            assert_verified_parity(&env, 1);
+            TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "alice")).unwrap();
+            assert_verified_parity(&env, 1);
+        });
+    }
+
+    // ── Issue #92: remove of last registered user returns to empty state ────
+
+    /// Removing the sole registered contributor must return the registry to a
+    /// clean empty state: no stale index entries, zero counters, every lookup
+    /// reporting absence — and a subsequent registration must still work
+    /// exactly as it would on a never-used registry (Issue #92).
+    #[test]
+    fn test_remove_last_user_returns_registry_to_empty_state() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), user.clone(), name.clone()).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0, "total must be zero after removing the sole registrant");
+            assert_eq!(stats.verified, 0, "verified must be zero after removing the sole registrant");
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+
+            assert!(TrustBridgeContract::get_address(env.clone(), name.clone()).is_none());
+            assert!(!TrustBridgeContract::has_record(env.clone(), name.clone()));
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let all = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+            assert_eq!(all.len(), 0, "username index must be empty after removing the sole registrant");
+
+            let page = TrustBridgeContract::get_registered_page(env.clone(), 0, 10).unwrap();
+            assert_eq!(page.len(), 0, "index page must be empty after removing the sole registrant");
+
+            let export = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(export.records.len(), 0);
+            assert_eq!(export.total, 0);
+            assert!(!export.has_more);
+            assert_eq!(export.next_cursor, None);
+        });
+
+        // Re-registering after the registry has gone fully empty must still work.
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+            assert!(!TrustBridgeContract::get_address(env.clone(), name.clone())
+                .unwrap()
+                .verified);
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), name.clone())
+                    .unwrap()
+                    .stellar_address,
+                user
+            );
+        });
+    }
+
+    // ── Issue #93: re-registration after remove ──────────────────────────────
+
+    /// Negative case for Issue #93: removing an unknown username must still
+    /// fail with `NotRegistered`, leaving nothing to clean up.
+    #[test]
+    fn test_remove_unknown_username_returns_not_registered() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "ghost"));
+            assert_eq!(result, Err(ContractError::NotRegistered));
+        });
+    }
+
+    /// Self-remove, then re-register the same username at a *new* Stellar
+    /// address: the new registration must succeed, start unverified, bind to
+    /// the new address, and require a fresh admin verification — no trust or
+    /// address binding carries over from the removed owner (Issue #93).
+    #[test]
+    fn test_self_remove_then_reregister_new_address_requires_reverification() {
+        let env = Env::default();
+        let (admin, user, new_owner, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+            TrustBridgeContract::remove(env.clone(), user.clone(), name.clone()).unwrap();
+
+            TrustBridgeContract::register(env.clone(), name.clone(), new_owner.clone()).unwrap();
+
+            let record = TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap();
+            assert_eq!(record.stellar_address, new_owner, "reregistration must bind to the new address");
+            assert!(!record.verified, "verified flag must not survive remove");
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).verified, 0);
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+
+            // The admin must verify again before the new owner is trusted.
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+            assert!(TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap().verified);
+        });
+    }
+
+    /// Admin-remove, then re-register the same username at a *new* Stellar
+    /// address: same guarantees as the self-remove path — new address, no
+    /// carried-over verification (Issue #93).
+    #[test]
+    fn test_admin_remove_then_reregister_new_address_requires_reverification() {
+        let env = Env::default();
+        let (admin, user, new_owner, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+            TrustBridgeContract::remove(env.clone(), admin.clone(), name.clone()).unwrap();
+
+            TrustBridgeContract::register(env.clone(), name.clone(), new_owner.clone()).unwrap();
+
+            let record = TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap();
+            assert_eq!(record.stellar_address, new_owner, "reregistration must bind to the new address");
+            assert!(!record.verified, "verified flag must not survive remove");
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).verified, 0);
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+        });
+    }
+
+    // ── Issue #91: max-length username register benchmark ───────────────────
+
+    /// Measures the metered cost of `register` at the maximum accepted GitHub
+    /// username length. Returns `(cpu_instructions, memory_bytes)`.
+    fn measure_register(github_username: &String, user: &Address, contract_id: &Address, env: &Env) -> (u64, u64) {
+        env.cost_estimate().budget().reset_default();
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(env.clone(), github_username.clone(), user.clone()).unwrap();
+        });
+        let budget = env.cost_estimate().budget();
+        (budget.cpu_instruction_cost(), budget.memory_bytes_cost())
+    }
+
+    /// Benchmarks `register` at `MAX_USERNAME_LEN` (39 characters) — the
+    /// worst-case invoke budget for the operation, since a single-character
+    /// username is not representative of the string storage, index append,
+    /// and event payload work `register` actually does (Issue #91).
+    ///
+    /// Pins the length assumption this benchmark is built on: if
+    /// `MAX_USERNAME_LEN` ever changes, this test fails clearly instead of
+    /// silently benchmarking a username that no longer represents the
+    /// worst case.
+    #[test]
+    fn test_bench_max_length_username_register() {
+        assert_eq!(
+            MAX_USERNAME_LEN, 39,
+            "MAX_USERNAME_LEN changed — update the max-length benchmark username to match"
+        );
+
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        let short_username = username(&env, "a");
+        let (short_cpu, short_mem) = measure_register(&short_username, &user, &contract_id, &env);
+
+        // Exactly MAX_USERNAME_LEN (39) characters.
+        let max_len_username = String::from_str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(max_len_username.len(), MAX_USERNAME_LEN);
+        let (max_cpu, max_mem) = measure_register(&max_len_username, &other, &contract_id, &env);
+
+        std::println!("operation,size,cpu_instructions,memory_bytes");
+        std::println!("register,1,{},{}", short_cpu, short_mem);
+        std::println!("register,{},{},{}", MAX_USERNAME_LEN, max_cpu, max_mem);
+
+        assert!(max_cpu > 0, "max-length register was not metered");
+
+        // The max-length username must be at least as expensive as a
+        // single-character one — otherwise it would not be the worst case
+        // this benchmark claims to measure.
+        assert!(
+            max_cpu >= short_cpu,
+            "max-length register ({max_cpu}) was cheaper than a 1-character register ({short_cpu})"
+        );
+
+        // register's extra work for a longer username is a fixed-size copy
+        // into a 39-byte stack buffer, not a nested or quadratic scan, so the
+        // gap over the 1-character baseline should stay small. 5x headroom
+        // absorbs per-call overhead while still catching a regression that
+        // makes cost scale badly with username length.
+        let ceiling = short_cpu.max(1) * 5;
+        assert!(
+            max_cpu <= ceiling,
+            "max-length register CPU cost grew unexpectedly: {max_cpu} exceeds ceiling {ceiling} (baseline {short_cpu})"
+        );
     }
 }
