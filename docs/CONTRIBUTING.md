@@ -103,7 +103,82 @@ Run tests:
 cargo test
 ```
 
-Soroban generates snapshot files in `test_snapshots/` — these are gitignored and regenerated locally.
+---
+
+## Snapshot Stabilization Policy
+
+### What are snapshots?
+
+Soroban's test environment can emit ledger/env state dumps into `test_snapshots/`.
+These are machine-generated files that represent a serialized snapshot of the
+simulated Soroban environment after a test sequence runs.
+
+### Are snapshots committed?
+
+**No.** `test_snapshots/` is listed in `.gitignore` and is intentionally excluded
+from version control. This is deliberate:
+
+- Snapshots are large, binary-adjacent files that produce high-noise diffs.
+- They are fully reproducible by running `cargo test` locally.
+- Committing them would cause spurious PR noise any time the SDK or env changes.
+
+### When should you use snapshot-based tests?
+
+Prefer **assert-based tests** in almost all cases:
+
+| Use case | Recommended approach |
+|----------|----------------------|
+| Auth enforcement (`require_auth`) | `assert_eq!(result, Err(ContractError::NotAuthorized))` |
+| Error codes | `assert_eq!(err.code(), 3)` |
+| Storage round-trips | Direct `get_address` / `get_stats` assertions |
+| Event emission | Assert on `env.events().all()` |
+| Large `Env` state dumps | Snapshot acceptable as a last resort |
+
+Only reach for snapshots when you need to capture a full environment dump that
+would be impractical to assert field-by-field (e.g. a complex multi-step migration
+sequence). If the assertion can be written explicitly, write it explicitly.
+
+### How to refresh snapshots
+
+If a code change legitimately alters snapshot output (e.g. a storage layout
+migration), regenerate them locally with:
+
+```bash
+cargo test -- --include-ignored
+```
+
+Or for a specific test:
+
+```bash
+cargo test <test_name> -- --include-ignored
+```
+
+The regenerated files will appear in `test_snapshots/`. They are not committed;
+each developer regenerates them from the current source.
+
+### Reviewing snapshot diffs in PRs
+
+Because `test_snapshots/` is gitignored, snapshot files will never appear in a PR
+diff. If a PR author mentions a snapshot change:
+
+1. Check out the branch locally and run `cargo test`.
+2. Inspect the generated files in `test_snapshots/` for unexpected storage key
+   additions, removed fields, or size regressions.
+3. If the snapshot change is intentional (schema migration, new field), the PR
+   description must explain the change and include before/after output or
+   a brief diff summary in prose.
+
+### CI behavior
+
+CI does **not** compare snapshots against a baseline — snapshots are gitignored
+and therefore not present in the checkout. CI validates correctness through
+`cargo test`, which must pass with zero failures. If your test relies on a
+snapshot file being present, the test must either regenerate it at the start of
+the run or be converted to an assert-based test.
+
+**Summary:** assert-based tests are the default; snapshots are an escape hatch
+for full-env dumps; `test_snapshots/` stays gitignored; CI stays green via
+`cargo test`.
 
 ## Writing Contract Tests
 
