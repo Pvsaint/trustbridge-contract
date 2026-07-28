@@ -2,7 +2,7 @@
 
 This document describes the design of **trustbridge-contract** — the on-chain GitHub username registry for TrustBridge on Stellar Soroban.
 
-Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md)
+Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md) · [CONTRACT_HEALTH](CONTRACT_HEALTH.md)
 
 ---
 
@@ -23,6 +23,10 @@ Consumers:
 2. **GitHub Action** — resolves usernames to payout addresses at CI time
 3. **Dashboard** — displays registry state, verification status, and stats
 4. **Admin** — verifies identities off-chain and marks them on-chain
+
+Operational monitors should compose liveness/readiness from existing read
+methods (no dedicated on-chain `health` entrypoint). See
+[CONTRACT_HEALTH.md](CONTRACT_HEALTH.md).
 
 ---
 
