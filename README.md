@@ -154,6 +154,8 @@ make fuzz          # Run the invariant property fuzzing suite
 make bench         # Report CPU/memory cost per contract operation
 make build         # Build optimized WASM (via stellar contract build)
 make check         # fmt + clippy + test + build
+make simulate-register CONTRACT_ID=$CONTRACT_ID STELLAR_ADDR=$STELLAR_ADDR
+                   # Simulate register and print gas/fee fields (no --send)
 ```
 
 The fuzzing suite drives randomized `register` / `verify` / `revoke_verification` /
