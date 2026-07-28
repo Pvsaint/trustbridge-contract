@@ -35,3 +35,30 @@ instead when syncing incrementally — it walks the same admin-gated index but
 in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
+
+## Migration-window dual read
+
+When a migration is in progress, resolve a username in this order:
+
+1. Query the local contract first.
+2. If the local lookup misses and the migration window is still open, call
+  the external read stub.
+3. If the stub returns an address, treat it as a candidate only until the
+  local contract imports the same username.
+4. Once the username exists locally, stop consulting the stub for that
+  record.
+
+The stub API shape is:
+
+```rust
+RegistryLookup {
+   github_username: String,
+   stellar_address: Option<String>,
+   source_registry_id: String,
+}
+```
+
+For test coverage, the repository includes a deterministic fixture stub with
+known usernames such as `legacy-alice` and `legacy-bob`. That lets dashboard
+sync tests cover the fallback path without depending on a live external
+registry or extra RPC wiring.

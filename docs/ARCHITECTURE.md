@@ -191,3 +191,37 @@ lto = true
 - **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md).
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
+
+## Migration Window Reads
+
+During a registry migration window, dashboards should treat the on-chain
+contract as the primary source and use the read-only legacy stub only as a
+fallback for usernames that are not yet present locally.
+
+Recommended order:
+
+| Step | Call | Why |
+|------|------|-----|
+| 1 | Local contract lookup (`get_address`, `has_record`, or paginated export) | Prefer the authoritative on-chain record first. |
+| 2 | External read stub | Only if the local lookup misses and the migration window is still open. |
+| 3 | Local contract again after sync | Once a username is imported, the local record wins on subsequent reads. |
+
+The stub interface is intentionally read-only and returns a deterministic
+fixture in tests, so dashboards can exercise the dual-read flow without
+introducing storage writes or ABI changes.
+
+```mermaid
+sequenceDiagram
+    participant D as Dashboard
+    participant C as Local contract
+    participant S as Legacy read stub
+
+    D->>C: lookup(username)
+    alt local hit
+        C-->>D: address present
+    else local miss during migration window
+        C-->>D: none
+        D->>S: lookup(username)
+        S-->>D: optional address + source registry id
+    end
+```
