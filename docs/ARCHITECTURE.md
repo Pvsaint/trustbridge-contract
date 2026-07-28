@@ -200,35 +200,37 @@ lto = true
 - **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md). Estimator TTL schedule: [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md).
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
-## Future Proposal: Registration Cooldown
 
-This proposal is for a future contract version only. It is not implemented in the current contract and does not change current storage or runtime behavior.
+## Migration Window Reads
 
-A registration cooldown can reduce rapid re-registration spam and username squatting churn by requiring a minimum delay between successful `register()` calls for the same username or address. The suggested policy is based on ledger timestamps and a per-username cooldown window.
+During a registry migration window, dashboards should treat the on-chain
+contract as the primary source and use the read-only legacy stub only as a
+fallback for usernames that are not yet present locally.
 
-### Proposed state machine
+Recommended order:
+
+| Step | Call | Why |
+|------|------|-----|
+| 1 | Local contract lookup (`get_address`, `has_record`, or paginated export) | Prefer the authoritative on-chain record first. |
+| 2 | External read stub | Only if the local lookup misses and the migration window is still open. |
+| 3 | Local contract again after sync | Once a username is imported, the local record wins on subsequent reads. |
+
+The stub interface is intentionally read-only and returns a deterministic
+fixture in tests, so dashboards can exercise the dual-read flow without
+introducing storage writes or ABI changes.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Register : register()
-    Register --> Success : registration succeeds
-    Success --> CooldownActive : store last_register_timestamp
-    CooldownActive --> Attempt : new registration attempt
-    Attempt --> Reject : if cooldown active
-    Attempt --> Register : if cooldown expired
+sequenceDiagram
+    participant D as Dashboard
+    participant C as Local contract
+    participant S as Legacy read stub
+
+    D->>C: lookup(username)
+    alt local hit
+        C-->>D: address present
+    else local miss during migration window
+        C-->>D: none
+        D->>S: lookup(username)
+        S-->>D: optional address + source registry id
+    end
 ```
-
-### Why a cooldown is desirable
-
-- Prevents automated or accidental rapid re-registrations that can overwhelm indexers and off-chain workflows.
-- Makes quick username churn more expensive, reducing incentives for username squatting and repeated remove/re-register loops.
-- Gives the dashboard and verification process more predictable time to reconcile state after a registration update.
-
-### Design notes
-
-- Proposed storage representation: extend `ContributorRecord` with `last_registered_at: u64`, or alternatively store a separate key such as `(Symbol("reg_cooldown"), github_username) -> u64`.
-- Estimated storage/rent impact: one additional 8-byte timestamp per registration record, plus whatever Soroban rent overhead already applies to the existing per-entry storage value. If stored as a separate key, the impact is larger because it adds a whole extra storage entry.
-- Address-change re-register: the cooldown should apply to the username being updated, so a re-register attempt during the cooldown window would be rejected even if the Stellar address changes.
-- Admin remove: admin-driven removal may be treated as orthogonal to the cooldown. A future design decision can choose whether `remove()` clears the cooldown or leaves it in place to prevent churn from repeated add/remove cycles.
-- Future verification flow: cooldown is enforcement on `register()` only. Verification status remains a separate concern; if a record is re-registered after cooldown expiry, the existing verification policy can still decide whether `verified` persists or resets based on address change.

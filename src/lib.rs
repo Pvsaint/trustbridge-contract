@@ -14,6 +14,7 @@ mod batch;
 mod error;
 mod error_context;
 mod events;
+mod registry_read_stub;
 mod storage;
 mod utils;
 mod version;

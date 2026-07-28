@@ -54,62 +54,35 @@ Tests for this behavior live alongside the contract in `src/lib.rs`
 ## Paginated registry reads (Wave #41 / Issue #143)
 
 `get_all_registered` returns the entire index in one call, which doesn't
-scale as the registry grows. Prefer cursor pagination for 100+ contributors
-(see also [issue #1](https://github.com/Stellar-TrustBridge/trustbridge-contract/issues/1)).
+scale as the registry grows. Use `get_registered_page(offset, limit)`
+instead when syncing incrementally — it walks the same admin-gated index but
+in bounded chunks, so a dashboard/indexer sync job can page through without
+risking a resource-limit failure on a large registry. See
+`test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
-### Limit constants (`src/storage.rs`)
+## Migration-window dual read
 
-| Constant | Value | Behavior |
-|----------|------:|----------|
-| `DEFAULT_PAGE_LIMIT` | `20` | Used when the caller passes `limit = 0` |
-| `MAX_PAGE_LIMIT` | `100` | Hard upper bound per invoke |
+When a migration is in progress, resolve a username in this order:
 
-Over-limit requests are **clamped** to `MAX_PAGE_LIMIT` (not rejected). Admin
-authorization on `get_registered_paginated` is unchanged.
+1. Query the local contract first.
+2. If the local lookup misses and the migration window is still open, call
+  the external read stub.
+3. If the stub returns an address, treat it as a candidate only until the
+  local contract imports the same username.
+4. Once the username exists locally, stop consulting the stub for that
+  record.
 
-### Cursor / page semantics
+The stub API shape is:
 
-`get_registered_paginated(cursor, limit)` and `get_public_paginated(cursor, limit)`
-return `ExportPage`:
-
-| Field | Meaning |
-|-------|---------|
-| `records` | Page of `(github_username, ContributorRecord)` |
-| `next_cursor` | `Some(offset)` for the next page, or `None` when exhausted |
-| `total` | Current registry `count` |
-| `has_more` | `true` iff `next_cursor` is `Some` |
-
-`cursor` is a **zero-based index offset** into the username index (not a opaque
-token). Exhaustion: `has_more == false` and `next_cursor == None` (also when
-`cursor >= total`).
-
-### Consumer loop (fetch → process → next cursor → until exhausted)
-
-```text
-cursor = 0
-loop:
-  page = get_registered_paginated(cursor, limit)   # admin
-        # or get_public_paginated(cursor, limit)   # public, respects pause
-  process(page.records)
-  if not page.has_more or page.next_cursor is None:
-    break
-  cursor = page.next_cursor
+```rust
+RegistryLookup {
+   github_username: String,
+   stellar_address: Option<String>,
+   source_registry_id: String,
+}
 ```
 
-```bash
-# Admin page (auth required)
-make invoke-export-paginated CONTRACT_ID=$ID SOURCE=admin CURSOR=0 LIMIT=100
-
-# Public page (no admin auth; fails if paused)
-make invoke-public-paginated CONTRACT_ID=$ID CURSOR=0 LIMIT=100
-```
-
-Do **not** use `get_all_registered` once the registry approaches the ~100
-ledger-entry footprint ceiling; page until exhausted instead. ABI details:
-[ABI.md — Paginated export](ABI.md#paginated-export-issue-1--143).
-
-Related unit tests in `src/lib.rs`:
-
-- `test_paginated_export_at_max_page_limit`
-- `test_paginated_export_over_max_page_limit_clamps`
-- `test_get_registered_page_paginates_and_gates_on_admin`
+For test coverage, the repository includes a deterministic fixture stub with
+known usernames such as `legacy-alice` and `legacy-bob`. That lets dashboard
+sync tests cover the fallback path without depending on a live external
+registry or extra RPC wiring.
