@@ -9,10 +9,27 @@
 // this module's own tests but are not yet wired into `lib.rs`.
 #![allow(dead_code)]
 
-use soroban_sdk::{Env, String};
+use soroban_sdk::{Address, Env, String};
 
 /// GitHub caps usernames at 39 characters.
 pub const MAX_USERNAME_LEN: u32 = 39;
+
+/// Stellar strkey for the well-known "zero" G-address: the base32 encoding of
+/// an all-zero 32-byte ed25519 public key, with a valid checksum. No private
+/// key can ever exist for it, so it can never satisfy a `require_auth`.
+pub const ZERO_ADDRESS_STRKEY: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/// True when `address` is the well-known zero/burn address.
+///
+/// On a live network `stellar_address.require_auth()` alone would already
+/// reject this address, since nobody holds its private key. But
+/// `mock_all_auths` in tests and local dev sandboxes bypasses that check
+/// entirely, so a caller could otherwise register the zero address as a
+/// live entry. Checking explicitly also gives dashboard and indexer
+/// consumers a typed error instead of an opaque auth failure.
+pub fn is_zero_address(env: &Env, address: &Address) -> bool {
+    *address == Address::from_str(env, ZERO_ADDRESS_STRKEY)
+}
 
 /// Stack buffer size for username copies. Sized above `MAX_USERNAME_LEN`, so
 /// an over-long username is rejected on length before it is ever read.
@@ -137,14 +154,6 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
     if a.is_empty() {
         return true;
     }
-    if len > USERNAME_BUF {
-        return false;
-    }
-
-    let mut buf_a = [0u8; USERNAME_BUF];
-    let mut buf_b = [0u8; USERNAME_BUF];
-    a.copy_into_slice(&mut buf_a[..len]);
-    b.copy_into_slice(&mut buf_b[..len]);
 
     let mut buf_a = [0u8; USERNAME_BUF];
     let mut buf_b = [0u8; USERNAME_BUF];

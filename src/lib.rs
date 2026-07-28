@@ -14,24 +14,27 @@ pub use events::{
     PausedEvent, RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
-pub use storage::{ContributorRecord, ExportPage, Role, Stats};
+pub use storage::{ContributorRecord, ExportPage, Role, Stats, WasmAttestation, WasmProvenance};
 pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec, Symbol};
 
 use crate::batch::BatchConfig;
 use crate::storage::{
-    add_to_index, get_admin, get_cooldown as storage_get_cooldown, get_count, get_index,
-    get_record, get_registered_paginated_internal, get_role as storage_get_role,
-    get_stats as read_stats, get_verified_count as storage_get_verified_count,
-    get_version as storage_get_version, has_record, is_admin_caller, is_in_cooldown,
-    is_paused as storage_is_paused, remove_from_index, remove_record,
-    remove_role as storage_remove_role, require_initialized, require_not_paused,
-    set_cooldown as storage_set_cooldown, set_count, set_last_action,
-    set_paused as set_paused_state, set_record, set_role as storage_set_role, set_verified_count,
-    set_version, has_role_or_admin, ADMIN_KEY,
+    add_to_index, extend_record_ttl, get_admin, get_cooldown as storage_get_cooldown, get_count,
+    get_index, get_last_upgrade, get_record, get_registered_paginated_internal,
+    get_role as storage_get_role, get_stats as read_stats,
+    get_verified_count as storage_get_verified_count, get_version as storage_get_version,
+    get_wasm_attestation, get_wasm_provenance, has_record, has_role_or_admin, is_admin_caller,
+    is_in_cooldown, is_paused as storage_is_paused, remove_from_index, remove_record,
+    remove_role as storage_remove_role, remove_wasm_attestation, require_initialized,
+    require_not_paused, set_cooldown as storage_set_cooldown, set_count, set_last_action,
+    set_last_upgrade, set_paused as set_paused_state, set_record, set_role as storage_set_role,
+    set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance, ADMIN_KEY,
 };
-use crate::utils::{is_valid_github_username};
+use crate::utils::{
+    eq_ignore_ascii_case, is_valid_github_username, is_zero_address, MAX_USERNAME_LEN,
+};
 
 /// Version this WASM was built at. Instances whose stored version predates
 /// version tracking fall back to this.
@@ -158,10 +161,270 @@ impl TrustBridgeContract {
         storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
     }
 
-    // -- (WASM Upgrade functions removed for brevity if no changes; assuming they remain intact) -- 
-    // *Implementation note: Original attest_upgrade / get_provenance / upgrade functions kept intact per standard.*
+    /// Declares in advance the WASM hash the admin intends to deploy. Admin-only.
+    ///
+    /// Optional two-step upgrade. While an attestation is live, `upgrade` will
+    /// accept only the hash it names — so a compromised admin key cannot swap
+    /// in a different binary at the moment of the upgrade without first
+    /// publishing that intent on-chain, ahead of time, where watchers can see
+    /// it.
+    ///
+    /// `expires_at` must be in the future. The expiry is the point: an
+    /// attestation that never lapsed would be a standing authorisation for that
+    /// hash, which is strictly worse than having none at all.
+    ///
+    /// Publishing a new attestation replaces any existing one.
+    pub fn attest_upgrade(
+        env: Env,
+        wasm_hash: BytesN<32>,
+        expires_at: u64,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            return Err(ContractError::AttestationExpired);
+        }
+
+        set_wasm_attestation(
+            &env,
+            &WasmAttestation {
+                wasm_hash,
+                expires_at,
+                attested_by: admin,
+                attested_at: now,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Withdraws a pending upgrade attestation. Admin-only.
+    ///
+    /// The escape hatch for an attestation published in error: without it the
+    /// admin would have to wait out the expiry before upgrading to any other
+    /// hash.
+    pub fn clear_attestation(env: Env) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        remove_wasm_attestation(&env);
+        Ok(())
+    }
+
+    /// Returns the pending upgrade attestation, if any.
+    ///
+    /// Returned regardless of expiry — seeing a lapsed attestation is useful
+    /// when diagnosing a rejected upgrade.
+    pub fn get_attestation(env: Env) -> Option<WasmAttestation> {
+        get_wasm_attestation(&env)
+    }
+
+    /// Returns the provenance of the currently deployed WASM.
+    ///
+    /// `None` on an instance that has never been upgraded. `previous_wasm_hash`
+    /// names the hash this one replaced, so the deployment lineage can be walked
+    /// backwards through historical `UpgradedEvent`s.
+    pub fn get_provenance(env: Env) -> Option<WasmProvenance> {
+        get_wasm_provenance(&env)
+    }
+
+    /// Upgrades contract WASM executable code. Admin-only.
+    ///
+    /// Records provenance for the new hash: what it replaced, who authorised
+    /// it, when, at what version, and whether it had been attested. Previously
+    /// this wrote only a bare timestamp, so "what is deployed, and what did it
+    /// replace?" could not be answered from a contract call at all.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+
+        Self::require_cooldown_elapsed(&env, now)?;
+        let attested = Self::consume_attestation(&env, &new_wasm_hash, now)?;
+
+        // Provenance is captured before the executable is swapped: after
+        // update_current_contract_wasm the code answering these questions is
+        // the new binary, and the record of what it replaced would be lost.
+        let previous_wasm_hash = get_wasm_provenance(&env).map(|p| p.wasm_hash);
+        let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+
+        set_wasm_provenance(
+            &env,
+            &WasmProvenance {
+                wasm_hash: new_wasm_hash.clone(),
+                previous_wasm_hash,
+                upgraded_by: admin,
+                upgraded_at: now,
+                version,
+                attested,
+            },
+        );
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        set_last_upgrade(&env, now);
+
+        let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+        UpgradedEvent {
+            new_wasm_hash,
+            version,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Enforces the upgrade timelock.
+    ///
+    /// Extracted from `upgrade` so the entry point reads as its four distinct
+    /// steps — timelock, attestation, provenance, swap — instead of one block
+    /// of interleaved policy.
+    fn require_cooldown_elapsed(env: &Env, now: u64) -> Result<(), ContractError> {
+        let cooldown = storage_get_cooldown(env);
+        if cooldown == 0 {
+            return Ok(());
+        }
+
+        // A contract that has never upgraded has no last-upgrade timestamp to
+        // measure from; treating the missing value as 0 would make the very
+        // first upgrade wait out a cooldown against the epoch.
+        if !env.storage().instance().has(&crate::storage::LAST_UPG_KEY) {
+            return Ok(());
+        }
+
+        if now < get_last_upgrade(env).saturating_add(cooldown) {
+            return Err(ContractError::CooldownActive);
+        }
+
+        Ok(())
+    }
+
+    /// Validates `new_wasm_hash` against any live attestation and clears it.
+    ///
+    /// Returns whether the upgrade was covered by an attestation, which is
+    /// recorded in the provenance so an auditor can tell a two-step upgrade
+    /// from a direct one after the fact.
+    fn consume_attestation(
+        env: &Env,
+        new_wasm_hash: &BytesN<32>,
+        now: u64,
+    ) -> Result<bool, ContractError> {
+        let attestation = match get_wasm_attestation(env) {
+            Some(a) => a,
+            // Attestation is opt-in: with none published, upgrade behaves as it
+            // always has. Making it mandatory would brick every deployment that
+            // upgrades without adopting the new flow.
+            None => return Ok(false),
+        };
+
+        if now > attestation.expires_at {
+            // Clear the stale record so the admin is not forced to call
+            // clear_attestation before retrying.
+            remove_wasm_attestation(env);
+            return Err(ContractError::AttestationExpired);
+        }
+
+        if attestation.wasm_hash != *new_wasm_hash {
+            // Deliberately left in place: a mismatch may be an attacker
+            // substituting a binary, and clearing it here would let a second
+            // attempt through unchecked.
+            return Err(ContractError::UnattestedWasm);
+        }
+
+        // Single-use — an attestation authorises one upgrade, not a standing
+        // permission for that hash.
+        remove_wasm_attestation(env);
+        Ok(true)
+    }
+
+    /// Migrates contract version state. Admin-only.
+    pub fn migrate(env: Env, new_version: (u32, u32, u32)) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let current = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+        if new_version <= current {
+            return Err(ContractError::InvalidVersion);
+        }
+
+        set_version(&env, new_version);
+        Ok(())
+    }
+
+    /// Returns the deployed contract version as `(major, minor, patch)`.
+    ///
+    /// Instances initialized before versioning was added carry no stored
+    /// version and report the build constant instead.
+    pub fn version(env: Env) -> (u32, u32, u32) {
+        if require_initialized(&env).is_err() {
+            return CONTRACT_VERSION.to_tuple();
+        }
+        storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
+    }
+
+    /// Reports whether the deployed contract satisfies a client's minimum
+    /// required version. Bindings consumers call this before invoking, so a
+    /// stale client fails fast instead of on an unexpected ABI.
+    pub fn is_compatible(env: Env, major: u32, minor: u32, patch: u32) -> bool {
+        Version::from_tuple(Self::version(env))
+            .is_compatible_with(Version::new(major, minor, patch))
+    }
+
+    /// Returns the maximum accepted GitHub username length.
+    ///
+    /// Clients read this instead of hardcoding 39, so a future relaxation of
+    /// the guard does not require a client release.
+    pub fn max_username_len(_env: Env) -> u32 {
+        MAX_USERNAME_LEN
+    }
+
+    /// Reports whether `github_username` would pass the `register` guard.
+    /// Lets a dashboard validate input before asking the user to sign.
+    pub fn is_username_valid(_env: Env, github_username: String) -> bool {
+        is_valid_github_username(&github_username)
+    }
+
+    /// Reports whether `address` is the well-known zero/burn address that
+    /// `register` rejects. Lets a dashboard or indexer consumer validate a
+    /// Stellar address before asking a user to sign, mirroring
+    /// `is_username_valid`.
+    pub fn is_address_zero(env: Env, address: Address) -> bool {
+        is_zero_address(&env, &address)
+    }
+
+    /// Case-insensitive username equality, matching GitHub's own semantics.
+    ///
+    /// Off-chain verification workflows use this to match a registration
+    /// against a GitHub identity without depending on the stored casing.
+    pub fn usernames_match(_env: Env, a: String, b: String) -> bool {
+        eq_ignore_ascii_case(&a, &b)
+    }
 
     /// Registers or updates a GitHub username → Stellar address mapping.
+    ///
+    /// The caller must authenticate as `stellar_address`. The username must be
+    /// 1 to `MAX_USERNAME_LEN` (39) characters of alphanumerics, hyphens, and
+    /// underscores, starting and ending alphanumeric, or the call fails with
+    /// `InvalidUsername`. `stellar_address` must not be the well-known
+    /// zero/burn address, or the call fails with `ZeroAddress`.
+    ///
+    /// Re-pointing an existing registration at a different address also
+    /// requires authentication from the address currently registered, so a
+    /// username cannot be taken over by whoever calls `register` next.
     pub fn register(
         env: Env,
         github_username: String,
@@ -172,6 +435,15 @@ impl TrustBridgeContract {
 
         if !is_valid_github_username(&github_username) {
             return Err(ContractError::InvalidUsername);
+        }
+
+        // Reject the zero/burn address before auth too. On a live network
+        // `require_auth` below would already fail for it since nobody holds
+        // its private key, but `mock_all_auths` in tests and local sandboxes
+        // bypasses that check — and a typed `ZeroAddress` error is more
+        // useful to dashboard/indexer consumers than an opaque auth failure.
+        if is_zero_address(&env, &stellar_address) {
+            return Err(ContractError::ZeroAddress);
         }
 
         stellar_address.require_auth();
@@ -352,12 +624,11 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
-    pub fn verify(
-        env: Env,
-        caller: Address,
-        github_username: String,
-    ) -> Result<(), ContractError> {
+    /// Marks a contributor as verified after an off-chain GitHub identity check.
+    ///
+    /// Callable by the contract admin **or** any address assigned the
+    /// `Role::Verifier` role (Issue #12 — verifier role separation).
+    pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
@@ -1834,7 +2105,7 @@ mod test {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(15), None);
+        assert_eq!(ContractError::from_code(16), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -2602,42 +2873,6 @@ mod test {
                 1
             );
         });
-    }
-
-    // ── Issue #16: from_code round-trip and completeness ─────────────────────
-
-    /// Every variant's code() must round-trip through from_code() (Issue #16).
-    #[test]
-    fn test_from_code_round_trips_all_variants() {
-        let all = [
-            ContractError::AlreadyInitialized,
-            ContractError::NotInitialized,
-            ContractError::NotAuthorized,
-            ContractError::NotRegistered,
-            ContractError::AlreadyVerified,
-            ContractError::NotVerified,
-            ContractError::Paused,
-            ContractError::CooldownActive,
-            ContractError::InvalidVersion,
-            ContractError::InvalidRole,
-        ];
-        for variant in all {
-            assert_eq!(
-                ContractError::from_code(variant.code()),
-                Some(variant),
-                "from_code({}) did not return {:?}",
-                variant.code(),
-                variant
-            );
-        }
-    }
-
-    /// Codes not in the enum must return None (Issue #16).
-    #[test]
-    fn test_from_code_unknown_returns_none() {
-        assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(15), None);
-        assert_eq!(ContractError::from_code(u32::MAX), None);
     }
 
     // ── Issue #54: Additional not-initialized guard tests ────────────────────

@@ -27,22 +27,25 @@ pub const ROLE_KEY: Symbol = symbol_short!("role");
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
 pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
+/// Key for the WASM provenance record (Wave #24).
 pub const PROV_KEY: Symbol = symbol_short!("prov");
+/// Key for the pending upgrade attestation (Wave #24).
 pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
+#[allow(dead_code)]
 pub const VERSION_KEY: Symbol = VER_KEY;
 
-// ── Pagination constants ─────────────────────────────────────────────────────
+/// Entries per index chunk. Keeps a single chunk read well under the ledger
+/// entry size limit while still amortising reads across pages.
+pub const CHUNK_SIZE: u32 = 100;
 
+/// Page size used when a caller passes `limit = 0`.
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
+/// Upper bound on a single export page, to keep the response under the
+/// transaction result size limit (Issue #3, documented in DASHBOARD_SYNC.md).
 pub const MAX_PAGE_LIMIT: u32 = 100;
-
-// ── Chunked-index constants ──────────────────────────────────────────────────
-
-/// Maximum number of usernames per chunk slice.
-pub const CHUNK_SIZE: u32 = 50;
 
 // ─── TTL policy (Wave #7) ────────────────────────────────────────────────────
 //
@@ -68,21 +71,6 @@ pub const TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
 /// Comfortably inside the network's maximum persistent TTL, so an extension is
 /// never rejected for overshooting the cap.
 pub const TTL_BUMP: u32 = LEDGERS_PER_DAY * 90;
-
-// ── Pagination constants ─────────────────────────────────────────────────────
-
-/// Page size used when a caller passes `limit = 0`.
-pub const DEFAULT_PAGE_LIMIT: u32 = 20;
-/// Upper bound on a single export page, to keep the response under the
-/// transaction result size limit.
-pub const MAX_PAGE_LIMIT: u32 = 100;
-
-// ── Chunked-index constants ──────────────────────────────────────────────────
-
-/// Maximum number of usernames per chunk slice.
-pub const CHUNK_SIZE: u32 = 50;
-
-// ── Username validation ──────────────────────────────────────────────────────
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -270,31 +258,6 @@ pub fn get_index(env: &Env) -> Vec<String> {
 
 pub fn set_index(env: &Env, index: &Vec<String>) {
     env.storage().instance().set(&INDEX_KEY, index);
-}
-
-/// Returns a slice of the username index: up to `limit` entries starting at
-/// `offset`. Out-of-range offsets yield an empty page rather than an error.
-pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
-    let index = get_index(env);
-    let mut page = Vec::new(env);
-
-    let effective_limit = if limit == 0 {
-        DEFAULT_PAGE_LIMIT
-    } else {
-        limit.min(MAX_PAGE_LIMIT)
-    };
-
-    if offset >= index.len() {
-        return page;
-    }
-
-    let end = offset.saturating_add(effective_limit).min(index.len());
-    for i in offset..end {
-        if let Some(username) = index.get(i) {
-            page.push_back(username);
-        }
-    }
-    page
 }
 
 // ── Chunked username index ───────────────────────────────────────────────────
@@ -510,6 +473,38 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
         .set(&COOLDOWN_KEY, &cooldown_seconds);
 }
 
+// ── Pause state ──────────────────────────────────────────────────────────────
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+/// Guard used by every state-mutating entry point. Read-only functions do not
+/// call this, so the registry stays queryable while paused.
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
+    }
+}
+
+// ── Contract version ─────────────────────────────────────────────────────────
+
+/// Stored contract version tuple, or `None` on an instance that predates
+/// version tracking.
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VER_KEY)
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
+}
+
 // ─── WASM provenance & attestation (Wave #24) ────────────────────────────────
 
 /// Provenance of the currently deployed WASM. `None` before the first upgrade.
@@ -546,80 +541,6 @@ pub fn set_last_upgrade(env: &Env, timestamp: u64) {
     env.storage().instance().set(&LAST_UPG_KEY, &timestamp);
 }
 
-// ── Per-user action cooldown (Wave #33) ──────────────────────────────────────
-
-/// Records the ledger timestamp of the last mutating action for `github_username`.
-pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
-    let key = (LAST_ACT_KEY, github_username.clone());
-    env.storage().persistent().set(&key, &timestamp);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-/// Returns the timestamp of the last recorded action for `github_username`, or 0.
-pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
-    let key = (LAST_ACT_KEY, github_username.clone());
-    env.storage().persistent().get(&key).unwrap_or(0)
-}
-
-/// Returns true if `github_username` is still within the WASM-upgrade cooldown
-/// window for per-user rate-limiting.
-pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
-    let cooldown = get_cooldown(env);
-    if cooldown == 0 {
-        return false;
-    }
-    let last = get_last_action(env, github_username);
-    if last == 0 {
-        return false;
-    }
-    env.ledger().timestamp() < last.saturating_add(cooldown)
-}
-
-pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
-    env.storage().instance().get(&VER_KEY)
-}
-
-pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
-    env.storage().instance().set(&VER_KEY, version);
-}
-
-pub fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-}
-
-pub fn set_paused(env: &Env, paused: bool) {
-    env.storage().instance().set(&PAUSED_KEY, &paused);
-}
-
-pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused(env) {
-        Err(ContractError::Paused)
-    } else {
-        Ok(())
-    }
-}
-pub fn set_version(env: &Env, version: &(u32, u32, u32)) {
-    env.storage().instance().set(&VER_KEY, version);
-}
-
-pub fn is_paused(env: &Env) -> bool {
-    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
-}
-
-pub fn set_paused(env: &Env, paused: bool) {
-    env.storage().instance().set(&PAUSED_KEY, &paused);
-}
-
-pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused(env) {
-        Err(ContractError::Paused)
-    } else {
-        Ok(())
-    }
-}
-
 // ── Role-based access control ─────────────────────────────────────────────────
 
 pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
@@ -651,7 +572,6 @@ pub fn set_version(env: &Env, version: (u32, u32, u32)) {
     env.storage().instance().set(&VER_KEY, &version);
 }
 
-#[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.
 pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
     if let Ok(admin) = get_admin(env) {
         if *address == admin {

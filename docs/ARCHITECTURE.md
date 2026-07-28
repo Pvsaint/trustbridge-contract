@@ -2,7 +2,7 @@
 
 This document describes the design of **trustbridge-contract** — the on-chain GitHub username registry for TrustBridge on Stellar Soroban.
 
-Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md) · [Storage Key Audit](STORAGE_KEYS.md)
+Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md) · [STORAGE_FOOTPRINT](STORAGE_FOOTPRINT.md)
 
 ---
 
