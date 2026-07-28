@@ -2,7 +2,7 @@
 
 Step-by-step instructions for deploying **trustbridge-contract** to Stellar Testnet and Mainnet.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [Testnet Checklist](TESTNET_CHECKLIST.md) · [Security](SECURITY.md)
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [CONTRACT_HEALTH](CONTRACT_HEALTH.md)
 
 ---
 
@@ -382,6 +382,9 @@ See [STORAGE_RENT.md](STORAGE_RENT.md) for how simulation fits into the broader 
 2. Configure the GitHub Action with `CONTRACT_ID` and `NETWORK`
 3. Monitor events via a Stellar RPC endpoint or indexer
 4. Schedule TTL extensions for persistent storage entries on long-lived networks
+5. Wire production monitors to the probe sequence in
+   [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) (initialized?, admin set?, stats
+   sane?, optional Horizon lag)
 
 See [SECURITY.md](SECURITY.md) for operational security guidance.
 
