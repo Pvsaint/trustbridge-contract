@@ -403,14 +403,7 @@ and verified together should use `get_registered_paginated` (admin) or
 
 ---
 
-### `config_verification(caller: Address, attestation: Symbol, expiry: u64, quorum: u32) -> Result<(), ContractError>`
-Configures Verification defaults (attestation identifier, expiration timestamp, signature threshold quorum). Implements double-initialize rejection specific to this feature area to prevent arbitrary overwrites (Wave #54).
-| | |
-|---|---|
-| **Auth** | Admin |
-| **Caller arg** | `caller: Address` - must be the admin |
-| **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `AlreadyInitialized` |
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 *Note: Triggers `AlreadyInitialized` if executed after the initial verification configuration is stored.*
 ```bash
