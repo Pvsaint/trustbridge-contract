@@ -190,3 +190,66 @@ make invoke-init CONTRACT_ID=$CONTRACT_ID ADMIN=$ADMIN
 4. Schedule TTL extensions for persistent storage entries on long-lived networks
 
 See [SECURITY.md](SECURITY.md) for operational security guidance.
+
+---
+
+## WASM Size Budget
+
+Soroban charges upload fees proportional to WASM size, and the protocol imposes
+an upper limit. Keeping the binary small reduces deploy cost and makes upgrades
+cheaper.
+
+### Current budget
+
+| Metric | Value |
+|--------|-------|
+| Hard limit (CI gate) | **200 KB** (204 800 bytes) |
+| Typical release size | ~85 KB |
+| Headroom | ~115 KB |
+
+The hard limit is enforced by:
+
+- **CI**: the _WASM size regression gate_ step in `.github/workflows/ci.yml` fails
+  the build when `trustbridge-contract.wasm` exceeds `WASM_SIZE_LIMIT`.
+- **Local**: `make wasm-size` runs the same check after `make build`.
+
+### How to measure locally
+
+```bash
+make wasm-size
+```
+
+Output:
+
+```
+──────────────────────────────────────────
+  WASM size report
+──────────────────────────────────────────
+  File   : target/wasm32v1-none/release/trustbridge-contract.wasm
+  Size   : 87040 bytes (~85 KB)
+  Limit  : 204800 bytes (200 KB)
+──────────────────────────────────────────
+  Headroom: 117760 bytes remaining
+
+PASS: WASM size is within budget.
+```
+
+### Rationale for the 200 KB limit
+
+The optimised release WASM currently sits near 85 KB. 200 KB provides ~115 KB
+of headroom for intentional feature additions while still catching accidental
+bloat — e.g. a new dependency that pulls in an unintended transitive crate, or
+a build profile misconfiguration that disables LTO.
+
+### How to raise the limit
+
+If intentional feature growth pushes the binary past 200 KB:
+
+1. Run `make wasm-size` locally to measure the new size.
+2. Round up to the nearest 10 KB and add ~20 KB of headroom to get the new
+   ceiling.
+3. Update `WASM_SIZE_LIMIT` in **both** places (they must stay in sync):
+   - `Makefile` — the `WASM_SIZE_LIMIT ?=` variable
+   - `.github/workflows/ci.yml` — the `WASM_SIZE_LIMIT:` env variable
+4. Document the new limit and the feature that required the bump in this table.
+5. Include before/after sizes in the PR description.
