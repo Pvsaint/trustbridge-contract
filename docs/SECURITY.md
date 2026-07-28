@@ -2,7 +2,7 @@
 
 Security considerations for **trustbridge-contract**.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md)
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md) · [ADMIN_RUNBOOK](ADMIN_RUNBOOK.md)
 
 ---
 
@@ -38,6 +38,23 @@ The admin address is **immutable** after `initialize`. Recommendations:
 - Use a **multisig** or **smart account** as the admin G-address
 - Never commit private keys or seed phrases
 - Rotate operational keys via deploying a new contract instance if admin is compromised (no on-chain admin transfer in v0.1)
+
+### Mainnet verification-revoke incidents
+
+When a verified mapping is compromised or otherwise must not be trusted,
+**prefer `revoke_verification` over `remove`**. Revoke clears the verified flag
+and emits `VerificationRevokedEvent` without deleting the registration.
+
+Full operator sequence (detect → verify → revoke → notify → audit export), CLI
+examples, error handling, and comms templates live in
+[ADMIN_RUNBOOK.md — Mainnet incident: emergency verification revoke](ADMIN_RUNBOOK.md#mainnet-incident-emergency-verification-revoke).
+
+Auth reminder (see also [ABI.md](ABI.md)):
+
+- `caller` must `require_auth()` and be the contract admin **or** hold
+  `Role::Verifier`
+- Contract must be initialized and not paused
+- Do not use `remove` when revoke is sufficient for the incident
 
 ---
 
