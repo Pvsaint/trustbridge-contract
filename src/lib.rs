@@ -1890,6 +1890,71 @@ mod test {
         assert_eq!(client.get_stats().total, 1);
     }
 
+    // --- Issue #62: RegisteredEvent payload ---
+
+    #[test]
+    fn test_registered_event_payload_is_complete() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_600_000_000);
+        
+        client.register(&name, &user);
+
+        let expected = RegisteredEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 1_600_000_000,
+        };
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "RegisteredEvent payload or topics changed"
+        );
+
+        let topics = expected.topics(&env);
+        assert_eq!(topics.len(), 2, "RegisteredEvent must have 2 topics");
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            soroban_sdk::Symbol::new(&env, "RegisteredEvent"),
+            "RegisteredEvent topic symbol changed"
+        );
+        assert_eq!(
+            String::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            name,
+            "RegisteredEvent username topic changed"
+        );
+    }
+
+    #[test]
+    fn test_registered_event_not_published_on_failed_register() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        // We do NOT mock auth, so the registration should fail.
+        env.set_auths(&[]);
+        assert!(client.try_register(&name, &user).is_err());
+        
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "failed register published an event"
+        );
+    }
+
     // --- Issue #64: RemovedEvent payload ---
 
     #[test]
