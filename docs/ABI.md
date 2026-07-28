@@ -235,9 +235,9 @@ Remove a registration.
 
 | | |
 |---|---|
-| **Auth** | `caller` must sign; must be admin or registrant |
+| **Auth** | `caller` must sign; must be admin or registrant — see **Auth model** below |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotRegistered`, `NotAuthorized` |
+| **Errors** | `NotInitialized`, `Paused`, `NotRegistered`, `NotAuthorized` |
 | **Events** | `RemovedEvent` |
 
 ```bash
@@ -250,10 +250,52 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- remove --caller G... --github-username octocat
 ```
 
+**Auth model** (Issue #74 / Wave #75):
+
+The authorization check is isolated in `TrustBridgeContract::require_remove_auth`
+so it can be read, tested, and changed independently of the mutation logic:
+
+```
+caller == admin                    → allowed
+caller == record.stellar_address   → allowed (registrant self-removal)
+anything else                      → NotAuthorized
+```
+
+`caller.require_auth()` runs first — the host verifies the signature before the
+policy check. `NotRegistered` is returned before auth when the username does not
+exist in storage, so a caller cannot probe username existence by observing whether
+they get `NotRegistered` or `NotAuthorized`.
+
+**Error precedence:**
+
+| Condition | Error |
+|-----------|-------|
+| Contract not initialized | `NotInitialized` |
+| Contract paused | `Paused` |
+| Username not registered | `NotRegistered` |
+| Caller is not admin or registrant | `NotAuthorized` |
+
+**Test coverage** (`src/lib.rs`, Issue #74 / Wave #75):
+
+| Test | Path |
+|------|------|
+| `test_registrant_can_remove_own_record` | Success — registrant |
+| `test_admin_can_remove_any_record` | Success — admin |
+| `test_admin_can_remove_record_registered_by_another_user` | Success — admin removes different user's record |
+| `test_third_party_cannot_remove` | Failure — `NotAuthorized`, record and count unchanged |
+| `test_unknown_address_cannot_remove` | Failure — `NotAuthorized` for fresh address with no role |
+| `test_remove_unregistered_username_fails` | Failure — `NotRegistered` |
+| `test_remove_already_removed_username_fails` | Failure — `NotRegistered` on double removal |
+| `test_remove_blocked_while_paused` | Failure — `Paused` |
+| `test_remove_unverified_record_does_not_decrement_verified_count` | Invariant — verified count unchanged |
+| `test_remove_verified_record_decrements_verified_count` | Invariant — verified count decremented |
+| `test_readding_removed_user_increments_count` | Invariant — re-add starts fresh and unverified |
+
 Stats invariant: partial removal decrements `total` only for the removed record
 and decrements `verified` only when that removed record was verified. Removing
 an unverified record while another verified record remains must leave
-`verified` unchanged; this is covered by the Wave #46 regression test.
+`verified` unchanged; this is covered by the Wave #46 regression test and
+`test_remove_unverified_record_does_not_decrement_verified_count`.
 
 Index-length invariant: after every `remove`, `get_stats().total` must equal
 the length of the flat username index. Both are updated atomically in the same
