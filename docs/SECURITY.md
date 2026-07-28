@@ -14,7 +14,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 |--------|------------|
 | Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register |
 | Unauthorized removal | `caller` must auth as registrant or admin |
-| Unauthorized admin actions | `admin.require_auth()` on `verify` and `get_all_registered` |
+| Unauthorized admin actions | `admin.require_auth()` on `verify`, `revoke_verification`, `get_all_registered`, and all admin-only functions |
 | Double initialization | `AlreadyInitialized` error |
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
@@ -360,6 +360,37 @@ verification).
 
 The script is a deploy sanity check, not a substitute for `cargo test`
 (see `src/lib.rs` and `tests/integration.rs` for functional coverage).
+
+---
+
+## Verify and Revoke Verification CLI Usage
+
+The `verify` and `revoke_verification` functions are admin-only in the CLI documentation. The authoritative examples below use `--source = admin`. A non-admin caller (including a registrant) receives `NotAuthorized` and the transaction reverts.
+
+### Authoritative examples (admin path)
+
+```bash
+# Verify a contributor (admin must sign)
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- verify --caller G... --github-username octocat
+
+# Revoke verification (admin must sign)
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- revoke_verification --caller G... --github-username octocat
+```
+
+### Unauthorized failure (non-admin)
+
+If a non-admin address attempts either call, the transaction fails with `NotAuthorized`:
+
+```bash
+# This will fail — registrant cannot self-verify
+stellar contract invoke --id $ID --source registrant --network testnet --send=yes \
+  -- verify --caller G... --github-username octocat
+# Error: NotAuthorized (code 3)
+```
+
+Do not construct CLI examples that imply a registrant can self-verify. The contract rejects such calls at the auth layer.
 
 ---
 
