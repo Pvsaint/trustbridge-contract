@@ -17,6 +17,8 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Unauthorized admin actions | `admin.require_auth()` on `verify` and `get_all_registered` |
 | Double initialization | `AlreadyInitialized` error |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
+| Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
+| Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
 
@@ -62,12 +64,14 @@ point, no signature is spent on it, and no counter or index entry moves.
 | Rule | Value |
 |------|-------|
 | Length | 1 to 39 characters (GitHub's own cap) |
-| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
+| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` (ASCII only) |
 | First and last character | Must be alphanumeric |
+| Consecutive hyphens | Not allowed (`foo--bar` is rejected) |
+| Unicode / non-ASCII | Rejected — see **Unicode Rejection Policy** below |
 
 Rejection returns `InvalidUsername` (code 7).
 
-Validation lives in `src/utils.rs` and works entirely on a fixed 39-byte stack
+Validation lives in `src/utils.rs` and works entirely on a fixed 64-byte stack
 buffer. The contract is `#![no_std]`, so the validation path never allocates
 and the copy length is bounded before the copy happens.
 
@@ -81,6 +85,93 @@ Deliberate non-goals:
   `src/utils.rs` when comparing a registration against a GitHub identity.
 - **No on-chain proof the username exists on GitHub.** Validation checks shape,
   not ownership. Ownership remains the admin verification step.
+
+---
+
+## Unicode Rejection Policy
+
+**GitHub usernames are ASCII-only.** Any username containing a non-ASCII byte —
+including multi-byte UTF-8 sequences for accented letters (é, ü, ñ), emoji,
+CJK characters, or Cyrillic/Arabic/Hebrew script — is rejected with
+`InvalidUsername`.
+
+### Why this matters
+
+Unicode homoglyph attacks are a recognized impersonation vector. An attacker
+registers a username that **looks** visually identical to a legitimate user's
+name but uses different Unicode codepoints:
+
+- Cyrillic 'а' (U+0430) looks like ASCII 'a' (U+0061)
+- Greek 'ο' (U+03BF) looks like ASCII 'o' (U+006F)
+- Cyrillic 'с' (U+0441) looks like ASCII 'c' (U+0063)
+
+A username like `аlice` (Cyrillic 'а' + ASCII 'lice') appears indistinguishable
+from `alice` in most fonts, but encodes as `[0xD0, 0xB0, 0x6C, 0x69, 0x63, 0x65]`
+instead of `[0x61, 0x6C, 0x69, 0x63, 0x65]`. Without byte-level validation,
+this becomes a credential spoofing attack.
+
+### How the check works
+
+Validation is byte-wise, not glyph-wise:
+
+1. Every username is copied into a fixed stack buffer (64 bytes).
+2. Every byte is checked with `.is_ascii()` (returns false for bytes > 0x7F).
+3. Any multi-byte UTF-8 sequence has a leading byte ≥ 0x80, which fails the
+   ASCII check and is immediately rejected.
+
+This makes the homoglyph attack impossible: even if the rendered glyphs look
+identical, the byte sequences differ and only the ASCII form is accepted.
+
+### Covered cases
+
+The following are all rejected (see comprehensive tests in `src/utils.rs`):
+
+| Category | Example | Codepoint | UTF-8 Encoding |
+|----------|---------|-----------|----------------|
+| Latin-extended | `café` | U+00E9 é | `[0xC3, 0xA9]` |
+| Emoji | `user😀` | U+1F600 | `[0xF0, 0x9F, 0x98, 0x80]` |
+| CJK (Chinese/Japanese/Korean) | `中user` | U+4E2D 中 | `[0xE4, 0xB8, 0xAD]` |
+| Arabic | `مuser` | U+0645 م | `[0xD9, 0x85]` |
+| Hebrew | `אuser` | U+05D0 א | `[0xD7, 0x90]` |
+| Cyrillic homoglyph | `аlice` | U+0430 а | `[0xD0, 0xB0]` |
+| Greek homoglyph | `bοb` | U+03BF ο | `[0xCF, 0xBF]` |
+
+### Test coverage
+
+`src/utils.rs` includes a dedicated test suite for the Unicode rejection policy
+(Wave #69 / Issue #70):
+
+- `test_unicode_latin_extended_rejected`
+- `test_unicode_emoji_rejected`
+- `test_unicode_cjk_rejected`
+- `test_unicode_arabic_and_rtl_rejected`
+- `test_unicode_homoglyph_attack_rejected`
+- `test_unicode_all_non_ascii_rejected`
+- `test_unicode_embedded_at_any_position_rejected`
+- `test_raw_high_byte_rejected`
+- `test_valid_ascii_still_accepted_after_unicode_hardening`
+
+These tests confirm that every form of non-ASCII input — whether a visually
+distinct character like an emoji or a deceptive homoglyph like Cyrillic 'а' —
+is caught and rejected, while every valid ASCII username shape remains accepted.
+
+### Performance
+
+The check adds no allocations and no UTF-8 decoding overhead. It is a
+per-byte scan over a stack buffer, the same cost profile as the existing
+alphanumeric and hyphen checks.
+
+### Future considerations
+
+- Off-chain tooling (dashboard, indexers) should **canonicalize and validate**
+  usernames against the GitHub API before submitting them for registration.
+  The on-chain check is a last line of defense, not a substitute for
+  pre-submission validation.
+- If GitHub's own username policy changes (e.g. to allow certain Unicode
+  ranges), this validation will need to be relaxed via a contract upgrade and
+  a corresponding audit of the new attack surface.
+
+---
 
 ---
 

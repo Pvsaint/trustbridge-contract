@@ -111,7 +111,8 @@ Register or update a GitHub username mapping.
 | Rule | Accepted | Rejected |
 |---|---|---|
 | Length 1–39 characters | `a`, `octocat` | `""`, 40+ characters |
-| ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space`, `café` |
+| ASCII only — no Unicode | `user123`, `bob-smith` | `café`, `аlice` (Cyrillic a), `user😀`, `中user` |
+| ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space` |
 | First and last character alphanumeric | `alice`, `7` | `-invalid`, `invalid-`, `_leading`, `trailing_` |
 | No consecutive hyphens | `foo-bar-baz` | `foo--bar` |
 
@@ -149,8 +150,10 @@ Behavior:
 | Rule | Value |
 |------|-------|
 | Length | 1 to 39 characters (read `max_username_len` rather than hardcoding 39) |
-| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
+| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` (ASCII only) |
 | First and last character | Must be alphanumeric |
+| Consecutive hyphens | Not allowed (`foo--bar` → `InvalidUsername`) |
+| Non-ASCII / Unicode | Rejected — see [Unicode Rejection Policy](SECURITY.md#unicode-rejection-policy) |
 
 Anything else fails with `InvalidUsername` before any signature is verified and
 before any storage write, so a rejected call leaves counters and the export
