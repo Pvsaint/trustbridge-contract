@@ -162,7 +162,7 @@ Dashboard operators and auditors need the full failure surface of `verify` and `
 The matrix below covers every unauthorized and invalid state transition.  Each cell maps to an automated
 unit test in `src/lib.rs` (search for `#114`).
 
-Cross-reference: [remove auth negative matrix](#remove-auth-negative-matrix) · [ABI reference](ABI.md#verifygithub_username-string---resultcontracterror)
+Cross-reference: [remove auth negative matrix](#remove-auth-negative-matrix) (Issue #113) · [ABI reference](ABI.md#verifycaller-address-github_username-string---resultcontracterror)
 
 ### `verify` — negative matrix
 
