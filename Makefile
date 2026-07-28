@@ -18,7 +18,7 @@ NORM_BENCH_OUT ?= bench-username-normalization.txt
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 
-.PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean \
+.PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint docs docs-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
 
@@ -57,7 +57,13 @@ fmt: ## Check formatting
 lint: ## Run clippy
 	cargo clippy --all-targets -- -D warnings
 
-check: fmt lint test build ## Run full local quality gate
+docs: ## Build rustdoc for public API (opens in browser)
+	cargo doc --no-deps --open
+
+docs-check: ## Build rustdoc without opening browser (CI-equivalent)
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+check: fmt lint test build docs-check ## Run full local quality gate
 
 ci: check ## Alias for CI-equivalent checks
 

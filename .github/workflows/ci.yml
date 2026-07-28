@@ -54,3 +54,8 @@ jobs:
 
       - name: Verify WASM artifact exists
         run: test -f target/wasm32v1-none/release/trustbridge-contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge-contract.wasm
+
+      - name: cargo doc (public API)
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

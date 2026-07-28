@@ -88,6 +88,15 @@ pub const TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
 /// never rejected for overshooting the cap.
 pub const TTL_BUMP: u32 = LEDGERS_PER_DAY * 90;
 
+/// Role-Based Access Control variants for privileged contract operations.
+///
+/// Roles are assigned via `set_role` and revoked via `remove_role`.
+///
+/// | Variant | Grants access to |
+/// |---------|-----------------|
+/// | `Admin` | All admin-gated functions |
+/// | `Upgrader` | `upgrade` |
+/// | `Verifier` | `verify`, `revoke_verification` |
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 #[repr(u32)]
@@ -97,11 +106,19 @@ pub enum Role {
     Verifier = 3,
 }
 
+/// An on-chain record for a registered contributor.
+///
+/// Stored under `(Symbol("reg"), github_username)` in persistent storage.
+/// TTL is extended on every read and write; use `extend_registry_ttl` to
+/// refresh cold entries before they are archived.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct ContributorRecord {
+    /// The Stellar G-address that owns this registration.
     pub stellar_address: Address,
+    /// Ledger timestamp when this record was last written.
     pub registered_at: u64,
+    /// Whether the contributor has been verified by an admin or Verifier.
     pub verified: bool,
 }
 
@@ -156,19 +173,31 @@ pub struct WasmAttestation {
     pub attested_at: u64,
 }
 
+/// Aggregate registry statistics returned by `get_stats`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct Stats {
+    /// Total number of registered contributors.
     pub total: u32,
+    /// Number of contributors who have been verified.
     pub verified: u32,
 }
 
+/// A single page of registry records returned by paginated export functions.
+///
+/// `next_cursor` is `None` when this is the last page. Pass it as `cursor` to
+/// the next call to advance the page. `has_more` mirrors `next_cursor.is_some()`
+/// for clients that prefer a boolean sentinel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct ExportPage {
+    /// Records in this page: `(github_username, ContributorRecord)` pairs.
     pub records: Vec<(String, ContributorRecord)>,
+    /// Cursor to pass to the next call, or `None` if this is the last page.
     pub next_cursor: Option<u32>,
+    /// Total number of records in the registry at query time.
     pub total: u32,
+    /// `true` if there are more records after this page.
     pub has_more: bool,
 }
 
