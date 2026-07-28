@@ -47,9 +47,10 @@ This contract provides that mapping **on-chain**:
 - `register` — map GitHub username → Stellar address (requires address auth)
 - `get_address` — read-only lookup
 - `remove` — self-service or admin removal
-- `verify` — admin marks contributor as GitHub-verified
-- `revoke_verification` — admin revokes verified status
+- `verify` — admin or `Verifier`-role holder marks contributor as GitHub-verified
+- `revoke_verification` — admin or `Verifier`-role holder revokes verified status
 - `get_all_registered` — admin-only full export for dashboard sync
+- `scripts/export_registry.sh` / `scripts/validate_registry.sh` — CLI export to JSON and validate-only diff against live state (see [Registry Export & Import](docs/DEPLOYMENT.md#registry-export--import))
 - `get_stats` — total and verified registration counts
 - `pause` / `unpause` / `is_paused` — emergency circuit breaker to pause mutating contract state
 - `set_role` / `remove_role` / `get_role` — Role-Based Access Control (`Admin`, `Upgrader`, `Verifier`)
@@ -251,8 +252,8 @@ More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
 | `get_address(github_username)` | None | ❌ | Lookup by username |
 | `remove(caller, github_username)` | `caller` (registrant or admin) | ✅ | Remove a registration |
 | `get_all_registered()` | Admin | ❌ | Export full registry |
-| `verify(github_username)` | Admin | ✅ | Mark as GitHub-verified |
-| `revoke_verification(github_username)` | Admin | ✅ | Clear a verification |
+| `verify(caller, github_username)` | Admin **or** `Verifier`-role | ✅ | Mark as GitHub-verified |
+| `revoke_verification(caller, github_username)` | Admin **or** `Verifier`-role | ✅ | Clear a verification |
 | `get_verified_count()` | None | ❌ | Verified registration count |
 | `get_stats()` | None | ❌ | `{ total, verified }` |
 | `version()` | None | ❌ | Deployed version as `(major, minor, patch)` |

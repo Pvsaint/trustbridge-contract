@@ -266,9 +266,13 @@ stellar contract invoke --id $ID --source admin --network testnet \
   -- get_all_registered
 ```
 
+For a repeatable JSON export (backups, dashboard migrations, audit
+snapshots) that pages through `get_registered_paginated` instead of this
+single-call export, see [Registry Export & Import](DEPLOYMENT.md#registry-export--import).
+
 ---
 
-### `verify(github_username: String) -> Result<(), ContractError>`
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
 
@@ -339,7 +343,7 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 
 ---
 
-### `revoke_verification(github_username: String) -> Result<(), ContractError>`
+### `revoke_verification(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Revoke verification for a registered contributor.
 
@@ -553,6 +557,11 @@ Updates the contract schema version following a WASM upgrade. Target version mus
 ## Events
 
 All events are defined with `#[contractevent]` and include a topic field for filtering.
+
+For idempotent handling of these events by indexers — replays, gaps, and
+duplicate deliveries of `RegisteredEvent` / `VerifiedEvent` /
+`VerificationRevokedEvent` / `RemovedEvent` — see
+[DASHBOARD_SYNC.md — Event Idempotency & Replay Handling](DASHBOARD_SYNC.md#event-idempotency--replay-handling).
 
 ### RegisteredEvent
 

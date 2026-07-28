@@ -13,14 +13,18 @@ ADMIN       ?= $(shell $(STELLAR) keys address $(SOURCE) 2>/dev/null || echo "")
 CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
+CALLER      ?=
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
+EXPORT_FILE ?= registry-export-$(NETWORK).json
+ADMIN_SOURCE ?=
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
+        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+        export-registry validate-registry
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -132,21 +136,21 @@ invoke-stats: require-contract-id ## Read registry statistics (read-only)
 		--network $(NETWORK) \
 		-- get_stats
 
-invoke-verify: ## Mark a contributor as verified (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+invoke-verify: ## Mark a contributor as verified (admin or Verifier-role) (CALLER, GITHUB_USER, SOURCE, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		--send=yes \
-		-- verify --github-username $(GITHUB_USER)
+		-- verify --caller $(CALLER) --github-username $(GITHUB_USER)
 
-invoke-revoke-verification: ## Revoke contributor verification (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+invoke-revoke-verification: ## Revoke contributor verification (admin or Verifier-role) (CALLER, GITHUB_USER, SOURCE, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		--send=yes \
-		-- revoke_verification --github-username $(GITHUB_USER)
+		-- revoke_verification --caller $(CALLER) --github-username $(GITHUB_USER)
 
 invoke-get-all-registered: ## Export full registry mapping (admin-only) (SOURCE=admin, CONTRACT_ID)
 	$(STELLAR) contract invoke \
@@ -184,3 +188,9 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 		--network $(NETWORK) \
 		--send=yes \
 		-- set_paused --paused $(PAUSED)
+
+export-registry: require-contract-id ## Export full registry to JSON (admin) — see docs/DEPLOYMENT.md#registry-export--import (SOURCE=admin, CONTRACT_ID, EXPORT_FILE)
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) NETWORK=$(NETWORK) OUTPUT_FILE=$(EXPORT_FILE) ./scripts/export_registry.sh
+
+validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin for full diff)
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)
