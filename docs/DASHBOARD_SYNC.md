@@ -2,6 +2,30 @@
 
 The TrustBridge dashboard and indexer consumers combine Soroban contract state with Horizon API checks to ensure secure, efficient payout readiness and contributor index synchronization.
 
+## ABI Event Reference
+
+All contract events are documented with their topic and data field layouts in
+[docs/ABI.md#events](ABI.md#events). Indexers should use that section as the
+source of truth for topic symbols, field names, and types — mismatches between
+docs and on-chain `#[contractevent]` definitions are tracked as documentation
+bugs.
+
+Key events to watch:
+
+| Event | Topic symbol | Key data fields |
+|---|---|---|
+| `RegisteredEvent` | `registered_event` | `stellar_address`, `timestamp` |
+| `VerifiedEvent` | `verified_event` | `stellar_address`, `timestamp` |
+| `VerificationRevokedEvent` | `verification_revoked_event` | `stellar_address`, `timestamp` |
+| `RemovedEvent` | `removed_event` | `stellar_address`, `timestamp` |
+| `UpgradedEvent` | `upgraded_event` | `version`, `timestamp` |
+| `PausedEvent` / `UnpausedEvent` | `paused_event` / `unpaused_event` | `timestamp` |
+| `RoleGrantedEvent` / `RoleRevokedEvent` | `role_granted_event` / `role_revoked_event` | `role`, `admin`, `timestamp` / `admin`, `timestamp` |
+
+> **Note:** `RoleRevokedEvent` does **not** include the `role` field in its data
+> payload. If your indexer needs to know which role was revoked, correlate the
+> revocation with the most recent `RoleGrantedEvent` for that address.
+
 ## Features & Integration Overview
 
 1. **Chunked Username Index (Issue #2)**: Contributor usernames are stored in chunked persistent vectors (100 items per chunk) to avoid storage entry size limits at scale.
@@ -26,6 +50,29 @@ of `get_address`:
 Tests for this behavior live alongside the contract in `src/lib.rs`
 (`test_has_record_reflects_registration_state`) and `src/storage.rs`
 (`test_has_record_true_after_set_record`).
+
+## Cross-repo E2E demo
+
+Sibling TrustBridge repos can verify their integration against a live testnet
+contract using the bundled E2E demo:
+
+```bash
+CONTRACT_ID=C... \
+ADMIN=G... \
+E2E_STELLAR_ADDR=G... \
+SOURCE=demo \
+./scripts/demo_e2e.sh
+```
+
+Or via Make:
+
+```bash
+make demo-e2e CONTRACT_ID=C... ADMIN=G... E2E_STELLAR_ADDR=G... SOURCE=demo
+```
+
+The script walks `register → verify → lookup → export` and prints each step.
+It fails fast on any nonzero invoke and never touches mainnet. Secrets stay in
+env; nothing is committed.
 
 ## Paginated registry reads (Wave #41)
 

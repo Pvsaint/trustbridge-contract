@@ -144,24 +144,40 @@ Behavior:
   cleared until the admin verifies the updated address. The Wave #49 regression
   test covers re-verification against the new address.
 
-**Username rules** (enforced on-chain, checked before auth):
-
-| Rule | Value |
-|------|-------|
-| Length | 1 to 39 characters (read `max_username_len` rather than hardcoding 39) |
-| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
-| First and last character | Must be alphanumeric |
-
-Anything else fails with `InvalidUsername` before any signature is verified and
-before any storage write, so a rejected call leaves counters and the export
-index untouched. Underscores are accepted even though GitHub itself disallows
-them, so registrations made before validation existed stay readable and
-removable.
+**Copy-pasteable examples**
 
 ```bash
-stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
-  -- register --github-username octocat --stellar-address G...
+# New registration (registrant signs with the Stellar address being registered)
+stellar contract invoke --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  --send=yes \
+  -- register \
+  --github-username octocat \
+  --stellar-address G...
 ```
+
+```bash
+# Re-point an existing username to a new address
+# BOTH the old and new addresses must sign this call
+stellar contract invoke --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  --send=yes \
+  -- register \
+  --github-username octocat \
+  --stellar-address G...
+```
+
+**Common failure modes**
+
+| Failure | Cause | Fix |
+|---|---|---|
+| `NotInitialized` (code 2) | Contract not yet initialized | Run `make invoke-init` first |
+| `Paused` (code 7) | Contract is paused | Wait for unpause or contact admin |
+| `InvalidUsername` (code 11) | Username empty, >39 chars, or contains disallowed characters | Use 1–39 ASCII alphanumerics, hyphens, underscores |
+| `NotAuthorized` (code 3) | `stellar_address` did not sign, or old address did not sign on transfer | Ensure the correct source account is used |
+
 
 ---
 
@@ -611,12 +627,28 @@ topics: ["paused_event" / "unpaused_event", admin]
 data:   { timestamp }
 ```
 
-### RoleGrantedEvent / RoleRevokedEvent
+### RoleGrantedEvent
 
 ```
-topics: ["role_granted_event" / "role_revoked_event", address]
+topics: ["role_granted_event", address]
 data:   { role, admin, timestamp }
 ```
+
+`RoleGrantedEvent` is emitted when an admin assigns a role to an address.
+Subscribers can filter on the `address` topic to track role changes for a
+specific identity.
+
+### RoleRevokedEvent
+
+```
+topics: ["role_revoked_event", address]
+data:   { admin, timestamp }
+```
+
+`RoleRevokedEvent` is emitted when an admin revokes a role from an address.
+Like `RoleGrantedEvent`, the `address` topic lets indexers filter server-side.
+Note that `role` is **not** present in the data payload — a consumer that needs
+the previous role must track it from the corresponding `RoleGrantedEvent`.
 
 ---
 

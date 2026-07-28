@@ -42,12 +42,12 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
     if len == 0 {
         return true;
     }
-    if len > USERNAME_BUF_LEN {
+    if len > USERNAME_BUF {
         // Too long to inspect on the stack, but definitively not whitespace-only
         // for any input this contract accepts.
         return false;
     }
-    let mut buf = [0u8; USERNAME_BUF_LEN];
+    let mut buf = [0u8; USERNAME_BUF];
     s.copy_into_slice(&mut buf[..len]);
     buf[..len].iter().all(|b| b.is_ascii_whitespace())
 }
@@ -105,12 +105,12 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
     if len == 0 {
         return true;
     }
-    if len > USERNAME_BUF_LEN {
+    if len > USERNAME_BUF {
         return false;
     }
 
-    let mut buf_a = [0u8; USERNAME_BUF_LEN];
-    let mut buf_b = [0u8; USERNAME_BUF_LEN];
+    let mut buf_a = [0u8; USERNAME_BUF];
+    let mut buf_b = [0u8; USERNAME_BUF];
     a.copy_into_slice(&mut buf_a[..len]);
     b.copy_into_slice(&mut buf_b[..len]);
 
