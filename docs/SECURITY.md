@@ -360,6 +360,43 @@ Operational teams should:
 
 ---
 
+## Remove Auth Negative Matrix
+
+Auth gaps on `remove` are high-impact — an unauthorized removal erases a contributor's identity mapping without their consent.
+The full failure surface is documented here and covered by automated unit tests in `src/lib.rs` (search for `#113`).
+
+Cross-reference: [verify/revoke_verification negative matrix](#verify-and-revoke_verification-auth-negative-matrix) (Issue #114) · [ABI reference](ABI.md#removecaller-address-github_username-string---resultcontracterror)
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|---------------|------|------|
+| 1 | Contract not yet initialized | `NotInitialized` | 2 | `test_remove_negative_not_initialized` |
+| 2 | Username not registered | `NotRegistered` | 4 | `test_remove_negative_not_registered` |
+| 3 | Caller is a random address (not admin, not registrant) | `NotAuthorized` | 3 | `test_remove_negative_wrong_caller_random_address` |
+| 4 | **Registrant removes their own record** _(happy path)_ | `Ok(())` | — | `test_remove_positive_registrant_can_remove_own` |
+| 5 | **Admin removes any registration** _(happy path)_ | `Ok(())` | — | `test_remove_positive_admin_can_remove_any` |
+| 6 | Third-party address with no role | `NotAuthorized` | 3 | `test_remove_negative_third_party_no_role` |
+| 7 | `Role::Upgrader` holder (not registrant) | `NotAuthorized` | 3 | `test_remove_negative_upgrader_role_cannot_remove` |
+| 8 | `Role::Verifier` holder (not registrant) | `NotAuthorized` | 3 | `test_remove_negative_verifier_role_cannot_remove` |
+| 9 | Contract is paused | `Paused` | 7 | `test_remove_negative_paused` |
+
+### Auth rules for `remove`
+
+```
+caller == admin   →  allowed
+caller == record.stellar_address  →  allowed
+otherwise         →  NotAuthorized (code 3)
+```
+
+The `caller` address is a required argument because Soroban contracts cannot inspect the
+transaction source account without an explicit argument. Passing `caller` allows the contract
+to call `caller.require_auth()` and then check the above conditions in a single, auditable step.
+
+No special role (Upgrader, Verifier, or any future custom role) grants remove rights.
+Only the two identities above may remove a record — by design, to prevent privilege-escalation
+vectors where a broadly-held operational role could silently wipe contributor mappings.
+
+---
+
 ## Responsible Disclosure
 
 If you discover a security vulnerability:

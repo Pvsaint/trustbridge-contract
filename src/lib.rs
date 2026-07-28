@@ -3332,4 +3332,286 @@ mod test {
             );
         });
     }
+
+    // ── Issue #113: remove auth negative matrix ──────────────────────────────
+    //
+    // Matrix of all unauthorized / invalid `remove` call paths and their
+    // expected ContractError codes.  Each test corresponds to exactly one cell
+    // in the table published in docs/SECURITY.md.
+    //
+    // | # | Scenario                             | Expected error      | Code |
+    // |---|--------------------------------------|---------------------|------|
+    // | 1 | Contract not initialized             | NotInitialized      |  2   |
+    // | 2 | Username not registered              | NotRegistered       |  4   |
+    // | 3 | Caller is neither admin nor registrant | NotAuthorized     |  3   |
+    // | 4 | Registrant removes own record         | Ok (happy path)     |  —   |
+    // | 5 | Admin removes any record              | Ok (happy path)     |  —   |
+    // | 6 | Third-party address (no role)         | NotAuthorized       |  3   |
+    // | 7 | Upgrader-role holder (not admin/owner)| NotAuthorized       |  3   |
+    // | 8 | Verifier-role holder (not admin/owner)| NotAuthorized       |  3   |
+    // | 9 | Contract is paused                    | Paused              |  7   |
+
+    /// #113-cell-1: remove before initialization returns NotInitialized (code 2).
+    #[test]
+    fn test_remove_negative_not_initialized() {
+        let env = Env::default();
+        let caller = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                caller.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotInitialized),
+                "remove before init must return NotInitialized (code {})",
+                ContractError::NotInitialized.code()
+            );
+            assert_eq!(ContractError::NotInitialized.code(), 2);
+        });
+    }
+
+    /// #113-cell-2: remove on an unregistered username returns NotRegistered (code 4).
+    #[test]
+    fn test_remove_negative_not_registered() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                user.clone(),
+                username(&env, "ghost"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotRegistered),
+                "remove for non-existent username must return NotRegistered (code {})",
+                ContractError::NotRegistered.code()
+            );
+            assert_eq!(ContractError::NotRegistered.code(), 4);
+        });
+    }
+
+    /// #113-cell-3: caller is a random address (not admin, not registrant) → NotAuthorized (code 3).
+    #[test]
+    fn test_remove_negative_wrong_caller_random_address() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                other.clone(), // wrong caller
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "random-address remove must return NotAuthorized (code {})",
+                ContractError::NotAuthorized.code()
+            );
+            assert_eq!(ContractError::NotAuthorized.code(), 3);
+            // Registration must be intact
+            assert!(TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
+        });
+    }
+
+    /// #113-cell-4 (happy path): registrant can remove their own record.
+    #[test]
+    fn test_remove_positive_registrant_can_remove_own() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+            TrustBridgeContract::remove(
+                env.clone(),
+                user.clone(), // registrant
+                username(&env, "octocat"),
+            )
+            .unwrap();
+            assert!(
+                !TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")),
+                "record must be gone after registrant self-removes"
+            );
+        });
+    }
+
+    /// #113-cell-5 (happy path): admin can remove any registration.
+    #[test]
+    fn test_remove_positive_admin_can_remove_any() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+            TrustBridgeContract::remove(
+                env.clone(),
+                admin.clone(), // admin
+                username(&env, "octocat"),
+            )
+            .unwrap();
+            assert!(
+                !TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")),
+                "record must be gone after admin removes"
+            );
+        });
+    }
+
+    /// #113-cell-6: third-party address with no role cannot remove another user's record.
+    #[test]
+    fn test_remove_negative_third_party_no_role() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let stranger = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "alice"),
+                user.clone(),
+            )
+            .unwrap();
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                stranger.clone(), // no role
+                username(&env, "alice"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "no-role third party must not be allowed to remove (code {})",
+                ContractError::NotAuthorized.code()
+            );
+        });
+    }
+
+    /// #113-cell-7: Upgrader-role holder (not the registrant) cannot remove.
+    #[test]
+    fn test_remove_negative_upgrader_role_cannot_remove() {
+        let env = Env::default();
+        let (_admin, user, upgrader, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), upgrader.clone(), Role::Upgrader).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                upgrader.clone(), // Upgrader role, but not registrant or admin
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "Upgrader-role holder must not be allowed to remove (code {})",
+                ContractError::NotAuthorized.code()
+            );
+        });
+    }
+
+    /// #113-cell-8: Verifier-role holder (not the registrant) cannot remove.
+    #[test]
+    fn test_remove_negative_verifier_role_cannot_remove() {
+        let env = Env::default();
+        let (_admin, user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                verifier.clone(), // Verifier role, but not registrant or admin
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotAuthorized),
+                "Verifier-role holder must not be allowed to remove (code {})",
+                ContractError::NotAuthorized.code()
+            );
+        });
+    }
+
+    /// #113-cell-9: remove while contract is paused returns Paused (code 7).
+    #[test]
+    fn test_remove_negative_paused() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone()).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::remove(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::Paused),
+                "remove while paused must return Paused (code {})",
+                ContractError::Paused.code()
+            );
+            assert_eq!(ContractError::Paused.code(), 7);
+            // Registration must still be intact
+            assert!(TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
+        });
+    }
+
+    /// #113-verify-error-codes: all remove-relevant error codes match their ABI discriminants.
+    #[test]
+    fn test_remove_negative_error_codes_match_abi() {
+        // Verify the codes used in the remove auth matrix match the ABI table.
+        assert_eq!(ContractError::NotInitialized.code(), 2);
+        assert_eq!(ContractError::NotAuthorized.code(), 3);
+        assert_eq!(ContractError::NotRegistered.code(), 4);
+        assert_eq!(ContractError::Paused.code(), 7);
+    }
 }
