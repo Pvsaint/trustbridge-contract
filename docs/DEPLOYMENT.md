@@ -149,6 +149,27 @@ Checklist before mainnet:
 - [ ] Contract ID recorded in `deployments/mainnet.json`
 - [ ] TTL extension plan documented for persistent entries
 
+## Upgrade Window Read-Only Mode
+
+When rotating the WASM hash, put the contract into pause mode first so the
+upgrade window behaves as read-only for integrators:
+
+1. Call `set_paused(true)` as admin.
+2. Publish or apply the new WASM upgrade.
+3. Verify the new binary with the existing upgrade checks in [ABI.md](ABI.md)
+  and the deployment script flow in [scripts/deploy.sh](../scripts/deploy.sh).
+4. Call `set_paused(false)` once the upgrade is confirmed healthy.
+
+During this window, lookups remain safe, but mutation entry points reject with
+the existing pause error. In practice that means dashboards and indexers can
+keep using `get_address`, `get_stats`, and the export/pagination reads, while
+`register`, `remove`, `verify`, `pause`, `unpause`, `set_role`, `remove_role`,
+`set_cooldown`, `attest_upgrade`, `clear_attestation`, and `upgrade` are
+expected to fail fast until the contract is unpaused.
+
+This mode is an operator procedure, not a new ABI surface, so it does not
+change the public contract interface.
+
 ---
 
 ## Using the Makefile

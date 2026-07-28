@@ -844,20 +844,11 @@ impl TrustBridgeContract {
         get_registered_paginated_internal(&env, cursor, limit)
     }
 
-    /// Directly sets the contract pause state. Admin-only.
+    /// Toggles contract pause state. Admin-only (Issue #3).
     ///
-    /// Prefer the named `pause` / `unpause` entry points which emit the corresponding
-    /// events. This lower-level setter is kept for tooling that needs to set the flag
-    /// programmatically without the event emission overhead.
-    ///
-    /// # Auth
-    ///
-    /// Requires auth from the contract admin.
-    ///
-    /// # Errors
-    ///
-    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    /// Operators use this as the read-only upgrade window switch: set
+    /// `paused = true` before rotating the WASM hash so mutating calls fail
+    /// fast, then set it back to `false` after the new binary is confirmed.
     pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
