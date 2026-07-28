@@ -2032,6 +2032,305 @@ mod test {
         assert!(client.has_record(&name));
     }
 
+    // ── Issue #64 / Wave #65: VerifiedEvent payload ───────────────────────────
+    //
+    // VerifiedEvent is the primary signal an indexer uses to learn that a
+    // contributor's GitHub identity has been confirmed. Its payload is a
+    // compatibility surface: any change to the topic symbol, topic count, field
+    // set, or field order silently breaks every downstream subscriber.
+    //
+    // These tests pin the full payload — topics *and* data — so that a struct
+    // rename, a field addition, or a topic reorder fails the build rather than
+    // silently breaking production indexers.
+    //
+    // The same pattern is applied to VerificationRevokedEvent because revocation
+    // is the mirror operation: indexers subscribe to both and reconcile the
+    // verified state from the event stream.
+
+    /// VerifiedEvent carries the correct github_username, stellar_address, and
+    /// timestamp, and publishes them with the correct topic structure.
+    ///
+    /// An indexer replaying only this event must be able to reconstruct which
+    /// address was verified and when — so every field is asserted individually.
+    #[test]
+    fn test_verified_event_payload_is_complete() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+
+        // Fix the ledger timestamp so the assertion is deterministic.
+        env.ledger().set_timestamp(1_700_000_000);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+        });
+
+        let expected = VerifiedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 1_700_000_000,
+        };
+
+        // Assert the full event list matches exactly — topics and data.
+        // Any extra or missing field in VerifiedEvent will change data(&env)
+        // and fail here.
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "VerifiedEvent payload or topics changed"
+        );
+
+        // Pin the topic shape independently of the struct so that renaming the
+        // event symbol or reordering the topics breaks this test explicitly.
+        let topics = expected.topics(&env);
+        assert_eq!(topics.len(), 2, "VerifiedEvent must have exactly 2 topics");
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            soroban_sdk::Symbol::new(&env, "verified_event"),
+            "VerifiedEvent first topic must be the symbol 'verified_event'"
+        );
+        assert_eq!(
+            String::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            name.clone(),
+            "VerifiedEvent second topic must be the github_username"
+        );
+    }
+
+    /// Verifying an already-verified contributor must return AlreadyVerified
+    /// and must NOT publish a VerifiedEvent — an indexer must not see a
+    /// duplicate confirmation that could corrupt its verified-count bookkeeping.
+    #[test]
+    fn test_verified_event_not_published_on_already_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+        });
+
+        // Drain events from the first verify call.
+        let _ = env.events().all();
+
+        // Second verify on the same username must fail and publish nothing.
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone());
+            assert_eq!(
+                result,
+                Err(ContractError::AlreadyVerified),
+                "second verify must return AlreadyVerified"
+            );
+        });
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "AlreadyVerified must not publish a VerifiedEvent"
+        );
+    }
+
+    /// Verifying an unregistered username must return NotRegistered and must
+    /// NOT publish a VerifiedEvent.
+    #[test]
+    fn test_verified_event_not_published_on_unregistered_username() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result =
+                TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "ghost"));
+            assert_eq!(
+                result,
+                Err(ContractError::NotRegistered),
+                "verify on unknown username must return NotRegistered"
+            );
+        });
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "NotRegistered must not publish a VerifiedEvent"
+        );
+    }
+
+    /// VerifiedEvent data fields match the registered address, not any
+    /// other address.  Guards the case where a username was re-registered
+    /// to a new address before verification: the event must carry the
+    /// address that is actually verified, not a stale one.
+    #[test]
+    fn test_verified_event_carries_current_stellar_address() {
+        let env = Env::default();
+        let (admin, _old_user, new_user, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        // Register to old_user then immediately point at new_user.
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                name.clone(),
+                Address::generate(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::register(env.clone(), name.clone(), new_user.clone()).unwrap();
+        });
+
+        env.ledger().set_timestamp(2_000_000_000);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+        });
+
+        let expected = VerifiedEvent {
+            github_username: name.clone(),
+            stellar_address: new_user.clone(),
+            timestamp: 2_000_000_000,
+        };
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "VerifiedEvent must carry the current stellar_address, not a stale one"
+        );
+    }
+
+    // ── Issue #64 / Wave #65: VerificationRevokedEvent payload ───────────────
+
+    /// VerificationRevokedEvent carries the correct github_username,
+    /// stellar_address, and timestamp with the correct topic structure.
+    ///
+    /// Mirrors the VerifiedEvent test: revocation is the inverse operation and
+    /// indexers must be able to replay both to reconstruct verified state.
+    #[test]
+    fn test_verification_revoked_event_payload_is_complete() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), name.clone()).unwrap();
+        });
+
+        // Drain events so the revoke assertion is clean.
+        let _ = env.events().all();
+
+        env.ledger().set_timestamp(1_800_000_000);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                name.clone(),
+            )
+            .unwrap();
+        });
+
+        let expected = VerificationRevokedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 1_800_000_000,
+        };
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "VerificationRevokedEvent payload or topics changed"
+        );
+
+        let topics = expected.topics(&env);
+        assert_eq!(
+            topics.len(),
+            2,
+            "VerificationRevokedEvent must have exactly 2 topics"
+        );
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            soroban_sdk::Symbol::new(&env, "verification_revoked_event"),
+            "VerificationRevokedEvent first topic symbol changed"
+        );
+        assert_eq!(
+            String::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+            name.clone(),
+            "VerificationRevokedEvent second topic must be the github_username"
+        );
+    }
+
+    /// Revoking verification on an unverified contributor must return
+    /// NotVerified and must NOT publish a VerificationRevokedEvent.
+    #[test]
+    fn test_verification_revoked_event_not_published_on_not_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+
+        // Drain the RegisteredEvent.
+        let _ = env.events().all();
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                name.clone(),
+            );
+            assert_eq!(
+                result,
+                Err(ContractError::NotVerified),
+                "revoking unverified must return NotVerified"
+            );
+        });
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "NotVerified must not publish a VerificationRevokedEvent"
+        );
+    }
+
     // ── Pause / unpause workflow ──────────────────────────────────────────────
 
     #[test]

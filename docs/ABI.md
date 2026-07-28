@@ -602,12 +602,35 @@ topics: ["verified_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
+`VerifiedEvent` is the primary signal an indexer uses to learn that a
+contributor's GitHub identity has been confirmed. Its payload is a
+compatibility surface: any rename of the topic symbol, reorder of topics,
+or change to the data fields silently breaks every downstream subscriber.
+
+The following tests in `src/lib.rs` pin the full payload (Issue #64 / Wave #65):
+
+| Test | What it checks |
+|------|----------------|
+| `test_verified_event_payload_is_complete` | Full event list matches: topic symbol `"verified_event"`, `github_username` topic, `stellar_address` and `timestamp` in data |
+| `test_verified_event_not_published_on_already_verified` | **Failure path**: `AlreadyVerified` must not publish an event |
+| `test_verified_event_not_published_on_unregistered_username` | **Failure path**: `NotRegistered` must not publish an event |
+| `test_verified_event_carries_current_stellar_address` | Event carries the address current at verify time, not a stale pre-update address |
+
 ### VerificationRevokedEvent
 
 ```
 topics: ["verification_revoked_event", github_username]
 data:   { stellar_address, timestamp }
 ```
+
+Mirrors `VerifiedEvent`. Indexers subscribe to both and reconcile verified
+state from the event stream, so `VerificationRevokedEvent` is the same
+compatibility surface.
+
+| Test | What it checks |
+|------|----------------|
+| `test_verification_revoked_event_payload_is_complete` | Full event list matches: topic symbol, `github_username` topic, `stellar_address` and `timestamp` in data |
+| `test_verification_revoked_event_not_published_on_not_verified` | **Failure path**: `NotVerified` must not publish an event |
 
 ### UpgradedEvent
 
