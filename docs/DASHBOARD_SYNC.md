@@ -35,3 +35,15 @@ instead when syncing incrementally — it walks the same admin-gated index but
 in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
+
+## Storage rent estimator inputs (Issue #155)
+
+Wave budgeting UIs need a stable data shape for **on-chain** storage rent
+(per-user keys, instance overhead, TTL extension schedule) as a function of
+N contributors. That specification — including versioned JSON inputs and an
+explicit split from off-chain indexer storage — lives in:
+
+- [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md)
+- [storage-rent-estimator.inputs.v1.json](storage-rent-estimator.inputs.v1.json)
+
+Do not fold Horizon/indexer database size into the on-chain rent series.
