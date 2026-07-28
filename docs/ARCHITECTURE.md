@@ -2,7 +2,7 @@
 
 This document describes the design of **trustbridge-contract** — the on-chain GitHub username registry for TrustBridge on Stellar Soroban.
 
-Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md) · [STORAGE_FOOTPRINT](STORAGE_FOOTPRINT.md)
+Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md) · [STORAGE_RENT_ESTIMATOR](STORAGE_RENT_ESTIMATOR.md) · [DASHBOARD_SYNC](DASHBOARD_SYNC.md)
 
 ---
 
@@ -70,7 +70,10 @@ pub struct ContributorRecord {
 - **`idx` index:** Soroban does not support iterating arbitrary storage keys. The username index enables `get_all_registered()` without scanning the entire ledger.
 - **`vcount` counter:** Maintained incrementally so `get_stats()` is O(1) rather than scanning all records.
 - **Re-registration:** Updating an existing username overwrites the record. If the Stellar address changes, `verified` resets to `false` unless the address is unchanged.
-- **Schema Versioning:** The `migration_version` stored at `Symbol("ver")` is a `(u32, u32, u32)` tuple representing the deployed contract's schema version. Fresh deployments default to the build constant (`1.0.0`) on initialization. Upgrades to new version schemas require the admin to explicitly invoke the `migrate` function on-chain.
+- **Rent / Wave budgeting:** Dashboard UIs that estimate storage rent from N
+  users should consume the versioned estimator inputs in
+  [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md) (on-chain rent only;
+  indexer disk is separate).
 
 ---
 
@@ -190,7 +193,7 @@ lto = true
 
 ## Future Considerations
 
-- **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; see [docs/STORAGE_RENT.md](STORAGE_RENT.md) for the full rent economics and operator checklist.
+- **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md). Estimator TTL schedule: [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md).
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
 

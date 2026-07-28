@@ -83,16 +83,14 @@ in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
-## Zero-address rejection (Issue #70)
+## Storage rent estimator inputs (Issue #155)
 
-`register` rejects the well-known zero/burn Stellar address
-(`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`) with
-`ContractError::ZeroAddress` (code 15), checked before authentication.
+Wave budgeting UIs need a stable data shape for **on-chain** storage rent
+(per-user keys, instance overhead, TTL extension schedule) as a function of
+N contributors. That specification — including versioned JSON inputs and an
+explicit split from off-chain indexer storage — lives in:
 
-Dashboard and indexer consumers building a registration form should call
-`is_address_zero(address) -> bool` — mirroring the existing
-`is_username_valid` pre-check — before asking the connected wallet to sign,
-so a mistaken zero-address destination is caught client-side with a clear
-message instead of surfacing as a failed transaction. See `ABI.md` for the
-full function reference and `src/utils.rs::is_zero_address` for the contract
-implementation.
+- [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md)
+- [storage-rent-estimator.inputs.v1.json](storage-rent-estimator.inputs.v1.json)
+
+Do not fold Horizon/indexer database size into the on-chain rent series.
