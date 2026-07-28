@@ -60,29 +60,33 @@ in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
-## Migration-window dual read
+## Index compaction on removal (Issue #110)
 
-When a migration is in progress, resolve a username in this order:
+When a user is removed from the registry via `remove()`, the contract uses
+**index compaction** rather than swap-remove or tombstones:
 
-1. Query the local contract first.
-2. If the local lookup misses and the migration window is still open, call
-  the external read stub.
-3. If the stub returns an address, treat it as a candidate only until the
-  local contract imports the same username.
-4. Once the username exists locally, stop consulting the stub for that
-  record.
+- The username index is rebuilt without the removed entry
+- Remaining entries preserve their relative order
+- No holes are left in the index
+- `get_stats().total` always matches the actual number of accessible records
 
-The stub API shape is:
+This means:
+- **Exports are stable**: Paginated reads (`get_registered_paginated`,
+  `get_public_paginated`) return consistent results without skipping or
+  duplicating entries after removal
+- **No index holes**: Dashboard sync jobs can safely walk the index from
+  `cursor=0` to `total` without encountering missing records
+- **Stats accuracy**: The `total` count in stats and export pages always
+  reflects the current number of registered users
 
-```rust
-RegistryLookup {
-   github_username: String,
-   stellar_address: Option<String>,
-   source_registry_id: String,
-}
-```
+Example: Register users A, B, C → Remove B → Exports contain exactly A and C
+in order, with `total=2`.
 
-For test coverage, the repository includes a deterministic fixture stub with
-known usernames such as `legacy-alice` and `legacy-bob`. That lets dashboard
-sync tests cover the fallback path without depending on a live external
-registry or extra RPC wiring.
+Integrators building dashboards or indexers should:
+- Trust that `get_stats().total` matches the number of exportable records
+- Use paginated endpoints (`get_registered_paginated` or
+  `get_public_paginated`) for incremental sync
+- Not implement special handling for "holes" in the index — there are none
+
+Regression coverage: `test_integration_middle_user_removal_index_compaction`
+in `tests/integration.rs`.

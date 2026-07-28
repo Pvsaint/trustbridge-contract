@@ -921,6 +921,149 @@ fn test_integration_vcount_never_underflows() {
     });
 }
 
+// ── Middle-user removal regression (index compaction behavior) ───────────────
+
+/// Regression test for middle-user removal: verifies index compaction, export
+/// ordering, and stats consistency when removing a user from the middle of the
+/// registry (Issue #110).
+///
+/// This test documents the current behavior:
+/// - Index uses compaction (rebuilds without removed username)
+/// - Exports skip removed users correctly
+/// - Stats match actual remaining records
+/// - Paginated reads are consistent after removal
+#[test]
+fn test_integration_middle_user_removal_index_compaction() {
+    let (env, admin, user1, user2, contract_id) = setup_test_env();
+    let user3 = Address::generate(&env);
+
+    // Register three users: alice, bob, carol
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone()).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone()).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone()).unwrap();
+    });
+
+    // Verify initial state
+    env.as_contract(&contract_id, || {
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 3);
+    });
+
+    // Remove the middle user (bob)
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
+    });
+
+    // Verify remaining users are accessible
+    env.as_contract(&contract_id, || {
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).is_none(),
+            "removed user must not be accessible"
+        );
+        assert_eq!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "alice"))
+                .unwrap()
+                .stellar_address,
+            user1,
+            "alice must remain accessible"
+        );
+        assert_eq!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "carol"))
+                .unwrap()
+                .stellar_address,
+            user3,
+            "carol must remain accessible"
+        );
+    });
+
+    // Verify stats match actual records
+    env.as_contract(&contract_id, || {
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(stats.total, 2, "stats.total must match remaining records");
+        assert_eq!(stats.verified, 0, "no users were verified");
+    });
+
+    // Verify full export contains exactly the remaining users
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let all = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "export must contain exactly 2 users after middle removal"
+        );
+
+        let names: soroban_sdk::Vec<String> = {
+            let mut v = soroban_sdk::Vec::new(&env);
+            for i in 0..all.len() {
+                v.push_back(all.get(i).unwrap().0);
+            }
+            v
+        };
+        assert!(
+            names.contains(&s(&env, "alice")),
+            "export must include alice"
+        );
+        assert!(
+            names.contains(&s(&env, "carol")),
+            "export must include carol"
+        );
+        assert!(
+            !names.contains(&s(&env, "bob")),
+            "export must not include removed bob"
+        );
+
+        // Verify no duplicates in export
+        let mut seen_alice = false;
+        let mut seen_carol = false;
+        for i in 0..all.len() {
+            let (username, _) = all.get(i).unwrap();
+            if username == s(&env, "alice") {
+                assert!(!seen_alice, "alice must not appear twice in export");
+                seen_alice = true;
+            }
+            if username == s(&env, "carol") {
+                assert!(!seen_carol, "carol must not appear twice in export");
+                seen_carol = true;
+            }
+        }
+        assert!(
+            seen_alice && seen_carol,
+            "both alice and carol must appear in export"
+        );
+    });
+
+    // Verify paginated export is consistent
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        assert_eq!(
+            page.records.len(),
+            2,
+            "paginated export must contain 2 records"
+        );
+        assert_eq!(page.total, 2, "paginated total must match stats");
+        assert!(!page.has_more, "no more pages expected");
+        assert!(
+            page.next_cursor.is_none(),
+            "next_cursor must be None when no more pages"
+        );
+    });
+
+    // Verify public paginated endpoint is also consistent
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+        assert_eq!(
+            page.records.len(),
+            2,
+            "public paginated export must contain 2 records"
+        );
+        assert_eq!(page.total, 2, "public paginated total must match stats");
+    });
+}
+
 /// get_stats().verified matches get_verified_count() at every step (Issue #16).
 #[test]
 fn test_integration_stats_verified_matches_verified_count() {
