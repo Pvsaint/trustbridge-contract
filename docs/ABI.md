@@ -553,6 +553,11 @@ Admin authorization is authoritative. The `caller` argument must be the admin or
 
 Like `verify`, the `caller` argument enables on-chain role enforcement. Only the contract admin or a `Verifier`-role holder may revoke verification. An `Upgrader`-role holder or an address with no role returns `NotAuthorized`.
 
+**Mainnet incident response:** prefer this method over `remove` when the goal
+is to stop trust quickly. Operator runbook (detect → revoke → notify → audit
+export): [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md#mainnet-incident-emergency-verification-revoke).
+Threat-model notes: [SECURITY.md](SECURITY.md#mainnet-verification-revoke-incidents).
+
 ```bash
 # Admin revoking verification (authoritative example)
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
