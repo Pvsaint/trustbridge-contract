@@ -3218,4 +3218,272 @@ mod test {
             assert_eq!(TrustBridgeContract::get_role(env.clone(), verifier.clone()), Some(Role::Verifier));
         });
     }
+
+    // ── Issue #97: Harden immutable admin after init ──────────────────────────
+
+    /// A second `initialize` call must be rejected regardless of which admin
+    /// address it attempts to install, and the original admin must remain the
+    /// only recognized admin afterward (Issue #97).
+    #[test]
+    fn test_issue_97_second_initialize_rejected_with_different_admin() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+
+            let result = TrustBridgeContract::initialize(env.clone(), attacker.clone());
+            assert_eq!(result, Err(ContractError::AlreadyInitialized));
+
+            assert!(TrustBridgeContract::has_admin_role(env.clone(), admin.clone()));
+            assert!(!TrustBridgeContract::has_admin_role(env.clone(), attacker.clone()));
+        });
+    }
+
+    /// The admin recorded at `initialize` must survive every other mutating
+    /// entry point: nothing in the public API updates `ADMIN_KEY` after a
+    /// successful init (Issue #97).
+    #[test]
+    fn test_issue_97_admin_unchanged_across_unrelated_operations() {
+        let env = Env::default();
+        let (admin, user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::unpause(env.clone()).unwrap();
+            TrustBridgeContract::set_cooldown(env.clone(), 10).unwrap();
+            TrustBridgeContract::migrate(env.clone(), (1, 1, 0)).unwrap();
+
+            assert!(TrustBridgeContract::has_admin_role(env.clone(), admin.clone()));
+            assert!(!TrustBridgeContract::has_admin_role(env.clone(), user.clone()));
+            assert!(!TrustBridgeContract::has_admin_role(env.clone(), verifier.clone()));
+        });
+    }
+
+    // ── Issue #96: Export with verified flags ──────────────────────────────────
+
+    /// Paginated export on an empty registry returns no records (Issue #96).
+    #[test]
+    fn test_issue_96_paginated_export_verified_flags_empty_registry() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(page.records.len(), 0);
+            assert_eq!(page.total, 0);
+            assert!(!page.has_more);
+        });
+    }
+
+    /// Every record in an all-unverified registry reports `verified = false`
+    /// through the paginated export (Issue #96).
+    #[test]
+    fn test_issue_96_paginated_export_verified_flags_all_unverified() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+        let user3 = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "carol"), user3.clone()).unwrap();
+
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(page.records.len(), 3);
+            for i in 0..page.records.len() {
+                let (_name, record) = page.records.get(i).unwrap();
+                assert!(!record.verified);
+            }
+        });
+    }
+
+    /// A mixed verified/unverified registry surfaces the correct per-record
+    /// `verified` flag through both the admin and public paginated exports,
+    /// so consumers can obtain username + address + verified without a
+    /// second call or guessing (Issue #96).
+    #[test]
+    fn test_issue_96_paginated_export_verified_flags_mixed_registry() {
+        let env = Env::default();
+        let (admin, user1, user2, contract_id) = setup(&env);
+        let user3 = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "carol"), user3.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "bob")).unwrap();
+
+            let admin_page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(admin_page.records.len(), 3);
+
+            let public_page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(public_page.records.len(), 3);
+
+            for page in [&admin_page, &public_page] {
+                for i in 0..page.records.len() {
+                    let (name, record) = page.records.get(i).unwrap();
+                    let expected_verified = name == username(&env, "bob");
+                    assert_eq!(
+                        record.verified, expected_verified,
+                        "verified flag mismatch for {:?}", name
+                    );
+                }
+            }
+        });
+    }
+
+    // ── Issue #95: verify → revoke → verify cycle ──────────────────────────────
+
+    /// The full verify → revoke → verify cycle on one record must not
+    /// corrupt storage or counters: the verified counter returns to 1 after
+    /// the second verify, a fresh `VerifiedEvent` is published each time
+    /// verification is granted, and a `VerificationRevokedEvent` is
+    /// published on revoke. Storage keys for the record stay stable across
+    /// the cycle — only the `verified` flag and counters change (Issue #95).
+    #[test]
+    fn test_issue_95_verify_revoke_verify_cycle() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+
+        // First verify.
+        env.ledger().set_timestamp(1_000);
+        client.verify(&admin, &name);
+        let expected = VerifiedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 1_000,
+        };
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env, (contract_id.clone(), expected.topics(&env), expected.data(&env))],
+            "first verify must publish exactly one VerifiedEvent"
+        );
+        assert!(client.get_address(&name).unwrap().verified);
+        assert_eq!(client.get_verified_count(), 1);
+        assert_eq!(client.get_stats().verified, 1);
+
+        // Revoke.
+        env.ledger().set_timestamp(2_000);
+        client.revoke_verification(&admin, &name);
+        let expected = VerificationRevokedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 2_000,
+        };
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env, (contract_id.clone(), expected.topics(&env), expected.data(&env))],
+            "revoke must publish exactly one VerificationRevokedEvent"
+        );
+        assert!(!client.get_address(&name).unwrap().verified);
+        assert_eq!(client.get_verified_count(), 0);
+        assert_eq!(client.get_stats().verified, 0);
+
+        // Second verify, after revoke, must succeed and emit a fresh event.
+        env.ledger().set_timestamp(3_000);
+        client.verify(&admin, &name);
+        let expected = VerifiedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            timestamp: 3_000,
+        };
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env, (contract_id.clone(), expected.topics(&env), expected.data(&env))],
+            "second verify after revoke must publish a fresh VerifiedEvent"
+        );
+
+        // Counters and record state fully recover: verified count is back to
+        // 1, and the record's stable fields are untouched by the cycle.
+        let record = client.get_address(&name).unwrap();
+        assert!(record.verified);
+        assert_eq!(record.stellar_address, user);
+        assert_eq!(client.get_verified_count(), 1);
+        assert_eq!(client.get_stats().verified, 1);
+        assert_eq!(client.get_stats().total, 1);
+    }
+
+    /// Verifying twice without an intervening revoke must still fail with
+    /// `AlreadyVerified`, even mid-cycle after a prior revoke/verify round
+    /// trip — the cycle only reopens after an explicit revoke (Issue #95).
+    #[test]
+    fn test_issue_95_double_verify_without_revoke_fails_mid_cycle() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat")).unwrap();
+
+            let result = TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"));
+            assert_eq!(result, Err(ContractError::AlreadyVerified));
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+        });
+    }
+
+    // ── Issue #94: Expose multi-user register sequence ─────────────────────────
+
+    /// Reference fixture for dashboard/indexer integrators: registers three
+    /// users in sequence and asserts the `RegisteredEvent` published and the
+    /// `get_stats()` total after each step, so off-chain sync workers have a
+    /// documented, testable sequence to build against (Issue #94). See
+    /// `docs/DASHBOARD_SYNC.md` for the narrative version of this fixture.
+    #[test]
+    fn test_issue_94_multi_user_register_sequence() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+
+        let fixtures = [
+            (username(&env, "alice"), Address::generate(&env)),
+            (username(&env, "bob"), Address::generate(&env)),
+            (username(&env, "carol"), Address::generate(&env)),
+        ];
+
+        env.mock_all_auths();
+
+        for (i, (name, addr)) in fixtures.iter().enumerate() {
+            let timestamp = 1_000 + i as u64;
+            env.ledger().set_timestamp(timestamp);
+            client.register(name, addr);
+
+            // Exactly one RegisteredEvent per register call, in order.
+            let expected = RegisteredEvent {
+                github_username: name.clone(),
+                stellar_address: addr.clone(),
+                timestamp,
+            };
+            assert_eq!(
+                env.events().all(),
+                soroban_sdk::vec![&env, (contract_id.clone(), expected.topics(&env), expected.data(&env))],
+                "register #{} did not publish exactly one RegisteredEvent",
+                i + 1
+            );
+
+            // Stats total climbs by exactly one per registration.
+            assert_eq!(client.get_stats().total, (i + 1) as u32);
+            assert_eq!(client.get_stats().verified, 0);
+        }
+
+        // All three usernames resolve to their registered address, and the
+        // export is consistent for every one of them.
+        let all = client.get_all_registered();
+        assert_eq!(all.len(), fixtures.len() as u32);
+        for (name, addr) in fixtures.iter() {
+            assert_eq!(client.get_address(name).unwrap().stellar_address, *addr);
+            assert!(client.has_record(name));
+        }
+    }
 }

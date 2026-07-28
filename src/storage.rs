@@ -5,6 +5,11 @@ use crate::ContractError;
 // ── Storage keys ────────────────────────────────────────────────────────────
 
 pub const REG_KEY: Symbol = symbol_short!("reg");
+/// Storage key for the admin address. `initialize` is the **only** place
+/// that writes this key, gated by `AlreadyInitialized` so it can run once.
+/// No other public entry point mutates it — the admin is immutable after
+/// init; rotation requires redeploying a new instance. See
+/// `docs/SECURITY.md#admin-key-management` (Issue #97).
 pub const ADMIN_KEY: Symbol = symbol_short!("admin");
 pub const COUNT_KEY: Symbol = symbol_short!("count");
 pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
