@@ -35,6 +35,16 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I7 | A rejected operation moves no counter and mutates no record | `test_fuzz_failure_paths_leave_invariants_intact` |
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
 
+### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
+
+I3 above is also exercised directly, outside the fuzz suite, by
+`test_verified_count_parity_across_all_mutation_paths` in `src/lib.rs`. That
+test asserts `get_verified_count()` and `get_stats().verified` agree after
+every mutation path that touches verification state — `register` (including
+an address-change re-register), `verify`, `revoke_verification`, `remove`,
+a re-verify cycle, and the empty registry — so the two counters cannot drift
+apart silently. See [ABI.md#get_verified_count---u32](ABI.md#get_verified_count---u32).
+
 ### Verification carry-over rule
 
 Re-registering an existing username keeps `verified == true` **only** when the
