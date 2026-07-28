@@ -645,8 +645,15 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
-    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
+    /// Marks a contributor as verified after an off-chain GitHub identity check.
+    ///
+    /// Callable by the contract admin **or** any address assigned the
+    /// `Role::Verifier` role (Issue #12 — verifier role separation).
+    pub fn verify(
+        env: Env,
+        caller: Address,
+        github_username: String,
+    ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 

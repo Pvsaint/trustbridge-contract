@@ -268,7 +268,7 @@ stellar contract invoke --id $ID --source admin --network testnet \
 
 ---
 
-### `verify(github_username: String) -> Result<(), ContractError>`
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
 
