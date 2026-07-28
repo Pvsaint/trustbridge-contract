@@ -186,6 +186,32 @@ lto = true
 
 ---
 
+## Cross-Contract Composability
+
+Wave issue #149. Future TrustBridge contracts (payout, attestation) need to
+answer "is this GitHub username registered, and verified?" without
+maintaining a second copy of the registry. Soroban supports this natively:
+any contract can call another contract's public functions directly via
+`env.invoke_contract`, so no separate "reader" interface needed to be built —
+the registry's existing read functions (`get_address`, `has_record`,
+`get_stats`, `get_role`, …) already satisfy it.
+
+The one design decision this forces is which functions are *appropriate* to
+expose that way. A cross-contract call runs in the caller's authorization
+context, so a sibling contract can never supply the registry admin's
+signature — anything gated on `admin.require_auth()` (`get_all_registered`,
+`get_registered_page`, `get_registered_paginated`) is unreachable
+cross-contract by construction, not by an added check. That boundary, plus
+the full list of what *is* safe to call, is documented in
+[ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface).
+
+Because the safe surface is entirely existing, already-deployed functions,
+adopting it requires no storage migration and no new contract version for
+existing v0.1 consumers — `Version::supports_cross_contract_reads()` pins the
+compatibility floor at 1.0.0 for callers that want to assert it explicitly.
+
+---
+
 ## Future Considerations
 
 - **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md).

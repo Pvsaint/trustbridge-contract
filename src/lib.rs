@@ -19,16 +19,19 @@ pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
+use crate::batch::BatchConfig;
 use crate::storage::{
-    add_to_index, get_admin, get_cooldown as storage_get_cooldown, get_count, get_index,
-    get_last_upgrade, get_record, get_registered_paginated_internal, get_role as storage_get_role,
-    get_stats as read_stats, get_verified_count as storage_get_verified_count,
-    get_version as storage_get_version, has_record, is_admin_caller, is_in_cooldown,
+    add_to_index, extend_record_ttl, get_admin, get_cooldown as storage_get_cooldown, get_count,
+    get_index, get_last_upgrade, get_record, get_registered_paginated_internal,
+    get_role as storage_get_role, get_stats as read_stats, get_verified_count as storage_get_verified_count,
+    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance,
+    has_record, has_role_or_admin, is_admin_caller, is_in_cooldown,
     is_paused as storage_is_paused, remove_from_index, remove_record,
-    remove_role as storage_remove_role, require_initialized, require_not_paused,
-    set_cooldown as storage_set_cooldown, set_count, set_last_action, set_last_upgrade,
-    set_paused as set_paused_state, set_record, set_role as storage_set_role, set_verified_count,
-    set_version, ADMIN_KEY,
+    remove_role as storage_remove_role, remove_wasm_attestation, require_initialized,
+    require_not_paused, set_cooldown as storage_set_cooldown, set_count, set_last_action,
+    set_last_upgrade, set_paused as set_paused_state, set_record, set_role as storage_set_role,
+    set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance, WasmAttestation,
+    WasmProvenance, ADMIN_KEY,
 };
 use crate::utils::{eq_ignore_ascii_case, is_valid_github_username, MAX_USERNAME_LEN};
 
@@ -252,7 +255,7 @@ impl TrustBridgeContract {
         // update_current_contract_wasm the code answering these questions is
         // the new binary, and the record of what it replaced would be lost.
         let previous_wasm_hash = get_wasm_provenance(&env).map(|p| p.wasm_hash);
-        let version = storage_get_version(&env);
+        let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
 
         set_wasm_provenance(
             &env,
@@ -369,7 +372,7 @@ impl TrustBridgeContract {
         if require_initialized(&env).is_err() {
             return CONTRACT_VERSION.to_tuple();
         }
-        storage_get_version(&env)
+        storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
     }
 
     /// Reports whether the deployed contract satisfies a client's minimum
@@ -645,8 +648,11 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
-    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
+    /// Marks a contributor as verified after an off-chain GitHub identity check.
+    ///
+    /// Callable by the contract admin **or** any address assigned the
+    /// `Role::Verifier` role (Issue #12 — verifier role separation).
+    pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
@@ -1245,6 +1251,10 @@ mod test {
         });
     }
 
+    /// Issue #57: `verify` on a username with no registration fails closed
+    /// with `NotRegistered` instead of creating a verified record out of
+    /// nothing. Documented alongside the matching integration coverage in
+    /// `tests/integration.rs` and the error table in `docs/ABI.md`.
     #[test]
     fn test_verify_missing_registration_fails() {
         let env = Env::default();
@@ -1252,6 +1262,21 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             let result = TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "missing"));
+            assert_eq!(result, Err(ContractError::NotRegistered));
+        });
+    }
+
+    /// Same not-registered guard on the other verification-mutating entry
+    /// point, so `verify` and `revoke_verification` stay consistent (Issue
+    /// #57).
+    #[test]
+    fn test_revoke_verification_missing_registration_fails() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result =
+                TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), username(&env, "missing"));
             assert_eq!(result, Err(ContractError::NotRegistered));
         });
     }
@@ -1721,6 +1746,10 @@ mod test {
         });
     }
 
+    // Issue #53: every variant's numeric repr must match the table in
+    // error.rs, and stay in sync as new variants are added — a variant
+    // renumbered or added without a matching entry here breaks silently for
+    // off-chain consumers that decode raw u32 codes.
     #[test]
     fn test_error_codes_match_repr() {
         assert_eq!(ContractError::AlreadyInitialized.code(), 1);
@@ -1734,6 +1763,9 @@ mod test {
         assert_eq!(ContractError::InvalidVersion.code(), 9);
         assert_eq!(ContractError::InvalidRole.code(), 10);
         assert_eq!(ContractError::InvalidUsername.code(), 11);
+        assert_eq!(ContractError::AttestationExpired.code(), 12);
+        assert_eq!(ContractError::UnattestedWasm.code(), 13);
+        assert_eq!(ContractError::InvalidBatchSize.code(), 14);
     }
 
     #[test]
@@ -1750,11 +1782,17 @@ mod test {
             ContractError::InvalidVersion,
             ContractError::InvalidRole,
             ContractError::InvalidUsername,
+            ContractError::AttestationExpired,
+            ContractError::UnattestedWasm,
+            ContractError::InvalidBatchSize,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(12), None);
+        // 15 is one past the highest assigned variant (InvalidBatchSize = 14):
+        // the first code guaranteed not to collide with a real variant as the
+        // enum grows, unlike a fixed gap in the middle of the table.
+        assert_eq!(ContractError::from_code(15), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -1973,6 +2011,60 @@ mod test {
         assert!(client.has_record(&name));
     }
 
+    // ── Issue #56: unauthorized remove must not disturb registry events ──────
+
+    #[test]
+    fn test_unauthorized_remove_leaves_verified_record_and_events_intact() {
+        let env = Env::default();
+        let (admin, user, other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+        env.mock_all_auths();
+        client.verify(&admin, &name);
+
+        // Neither the registrant nor the admin: rejected, and must leave the
+        // registration, its verified flag, and the event log untouched. `all()`
+        // scopes to the last invocation, so an empty result here proves the
+        // failed call published no RemovedEvent (same idiom as
+        // test_removed_event_not_published_on_failed_remove).
+        assert!(client.try_remove(&other, &name).is_err());
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "unauthorized remove must not publish a RemovedEvent"
+        );
+        let record = client.get_address(&name).unwrap();
+        assert!(record.verified, "unauthorized remove must not clear verification");
+        assert_eq!(client.get_stats().verified, 1);
+    }
+
+    #[test]
+    fn test_unauthorized_remove_after_revoke_leaves_events_intact() {
+        let env = Env::default();
+        let (admin, user, other, contract_id) = setup(&env);
+        let client = TrustBridgeContractClient::new(&env, &contract_id);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        client.register(&name, &user);
+        env.mock_all_auths();
+        client.verify(&admin, &name);
+        env.mock_all_auths();
+        client.revoke_verification(&admin, &name);
+
+        assert!(client.try_remove(&other, &name).is_err());
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![&env],
+            "unauthorized remove must not publish a RemovedEvent after a prior revoke"
+        );
+        assert!(client.has_record(&name));
+        assert_eq!(client.get_stats().total, 1);
+    }
+
     // ── Pause / unpause workflow ──────────────────────────────────────────────
 
     #[test]
@@ -2126,23 +2218,7 @@ mod test {
         });
     }
 
-    // ── Error codes ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_error_codes_match_repr() {
-        assert_eq!(ContractError::AlreadyInitialized.code(), 1);
-        assert_eq!(ContractError::NotInitialized.code(), 2);
-        assert_eq!(ContractError::NotAuthorized.code(), 3);
-        assert_eq!(ContractError::NotRegistered.code(), 4);
-        assert_eq!(ContractError::AlreadyVerified.code(), 5);
-        assert_eq!(ContractError::NotVerified.code(), 6);
-        assert_eq!(ContractError::Paused.code(), 7);
-        assert_eq!(ContractError::CooldownActive.code(), 8);
-        assert_eq!(ContractError::InvalidVersion.code(), 9);
-        assert_eq!(ContractError::InvalidRole.code(), 10);
-    }
-
-    // ── Issue #16: from_code round-trip and completeness ─────────────────────
+    // ── Issue #16 / #53: from_code round-trip and completeness ───────────────
 
     /// Every variant's code() must round-trip through from_code() (Issue #16).
     #[test]
@@ -2158,6 +2234,10 @@ mod test {
             ContractError::CooldownActive,
             ContractError::InvalidVersion,
             ContractError::InvalidRole,
+            ContractError::InvalidUsername,
+            ContractError::AttestationExpired,
+            ContractError::UnattestedWasm,
+            ContractError::InvalidBatchSize,
         ];
         for variant in all {
             assert_eq!(
@@ -2174,7 +2254,7 @@ mod test {
     #[test]
     fn test_from_code_unknown_returns_none() {
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(11), None);
+        assert_eq!(ContractError::from_code(15), None);
         assert_eq!(ContractError::from_code(u32::MAX), None);
     }
 

@@ -15,41 +15,16 @@ pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chunkcnt");
+pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
-
-/// Entries per index chunk. Keeps a single chunk read well under the ledger
-/// entry size limit while still amortising reads across pages.
-pub const CHUNK_SIZE: u32 = 100;
-
-/// Page size used when a caller passes `limit = 0`.
-pub const DEFAULT_PAGE_LIMIT: u32 = 50;
-/// Upper bound on a single export page, to keep the response under the
-/// transaction result size limit.
-pub const MAX_PAGE_LIMIT: u32 = 200;
-
-/// Persistent entries are bumped when their remaining TTL drops below this.
-pub const TTL_THRESHOLD: u32 = 100_000;
-/// Ledgers of TTL to restore on bump (~60 days at 5s ledgers).
-pub const TTL_BUMP: u32 = 1_000_000;
+/// Key for the WASM provenance record (Wave #24).
+pub const PROV_KEY: Symbol = symbol_short!("prov");
+/// Key for the pending upgrade attestation (Wave #24).
+pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
 pub const VERSION_KEY: Symbol = VER_KEY;
-
-/// Key prefix for chunked username index entries.
-pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-/// Key for the count of chunks in the chunked index.
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
-/// Key for the per-user last-action timestamp (cooldown tracking).
-pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
-
-// ── TTL constants (ledger-based, ~7 days at 5 s/ledger) ─────────────────────
-
-/// Minimum TTL threshold before a bump is triggered (≈ 3 days).
-pub const TTL_THRESHOLD: u32 = 51840;
-/// Target TTL after a bump (≈ 7 days).
-pub const TTL_BUMP: u32 = 120960;
 
 // ── Pagination constants ─────────────────────────────────────────────────────
 
@@ -190,6 +165,33 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
         .ok_or(ContractError::NotInitialized)
 }
 
+/// Returns the stored contract version, or `None` on an instance initialized
+/// before version tracking was added.
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VERSION_KEY)
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VERSION_KEY, &version);
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+/// Rejects the call while the contract is paused.
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
+    }
+}
+
 pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
     let key = (REG_KEY, github_username.clone());
     let record: Option<ContributorRecord> = env.storage().persistent().get(&key);
@@ -264,19 +266,6 @@ pub fn get_index(env: &Env) -> Vec<String> {
 
 pub fn set_index(env: &Env, index: &Vec<String>) {
     env.storage().instance().set(&INDEX_KEY, index);
-}
-
-/// Returns a page of usernames from the flat index starting at `offset`.
-pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
-    let index = get_index(env);
-    let mut page = Vec::new(env);
-    let end = (offset.saturating_add(limit)).min(index.len());
-    for i in offset..end {
-        if let Some(u) = index.get(i) {
-            page.push_back(u);
-        }
-    }
-    page
 }
 
 // ── Chunked username index ───────────────────────────────────────────────────
@@ -563,39 +552,6 @@ pub fn remove_role(env: &Env, address: &Address) {
 /// True when `address` is the contract admin.
 pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
     matches!(get_admin(env), Ok(admin) if admin == *address)
-}
-
-/// Timestamp of `github_username`'s last cooldown-tracked action, or 0 if it
-/// has none. Cooldown is tracked per username rather than globally so one
-/// contributor's activity cannot block everyone else's.
-pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&(LAST_ACT_KEY, github_username.clone()))
-        .unwrap_or(0)
-}
-
-pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
-    let key = (LAST_ACT_KEY, github_username.clone());
-    env.storage().persistent().set(&key, &timestamp);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-/// True when the configured cooldown has not yet elapsed since
-/// `github_username`'s last tracked action. A cooldown of 0 disables the
-/// check entirely.
-pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
-    let cooldown = get_cooldown(env);
-    if cooldown == 0 {
-        return false;
-    }
-    let last = get_last_action(env, github_username);
-    if last == 0 {
-        return false;
-    }
-    env.ledger().timestamp() < last.saturating_add(cooldown)
 }
 
 #[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.

@@ -864,3 +864,39 @@ fn test_integration_stats_verified_matches_verified_count() {
     });
     check(&env, &contract_id);
 }
+
+// ── Issue #57: verify() on a not-registered username ──────────────────────────
+
+/// `verify` on a username with no registration returns `NotRegistered` and
+/// leaves the registry untouched — the not-registered path must fail closed
+/// rather than silently creating a verified record.
+#[test]
+fn test_integration_verify_not_registered_fails_and_leaves_registry_untouched() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let result = TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "ghost"));
+        assert_eq!(result, Err(ContractError::NotRegistered));
+    });
+
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "ghost")).is_none());
+        assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+    });
+}
+
+/// The same guard holds for `revoke_verification` on a not-registered
+/// username, so the two verification-mutating entry points stay consistent.
+#[test]
+fn test_integration_revoke_verification_not_registered_fails() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let result =
+            TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "ghost"));
+        assert_eq!(result, Err(ContractError::NotRegistered));
+    });
+}

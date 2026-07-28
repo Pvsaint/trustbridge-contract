@@ -268,7 +268,7 @@ stellar contract invoke --id $ID --source admin --network testnet \
 
 ---
 
-### `verify(github_username: String) -> Result<(), ContractError>`
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
 
@@ -283,7 +283,10 @@ Mark a contributor as verified after off-chain GitHub identity confirmation.
 The `caller` argument is required so the contract can validate which identity
 signed the transaction. Both the admin and any address granted `Role::Verifier`
 via `set_role` may call this function. An address without either role returns
-`NotAuthorized`.
+`NotAuthorized`. Calling `verify` on a `github_username` that has never been
+registered returns `NotRegistered` rather than creating a record (Issue #57);
+`revoke_verification` guards the same way (see tests in `src/lib.rs` and
+`tests/integration.rs`).
 
 ```bash
 # Admin calling verify
@@ -339,7 +342,7 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 
 ---
 
-### `revoke_verification(github_username: String) -> Result<(), ContractError>`
+### `revoke_verification(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Revoke verification for a registered contributor.
 
@@ -717,6 +720,72 @@ handshake costs no fees.
 
 A contract change that alters the ABI without a version bump leaves clients
 unable to detect the drift, so the bump is a review blocker.
+
+---
+
+## Cross-Contract Read Interface
+
+Sibling TrustBridge contracts (payout, attestation, and future Waves) can
+query registry state directly via Soroban's cross-contract call
+(`env.invoke_contract`), instead of duplicating registration/verification
+storage of their own. This section is the safe subset of the ABI for that use
+case — no new functions were added for it, only a fence around which existing
+ones are appropriate to call from another contract's execution context.
+
+### Safe to call cross-contract
+
+All of the following are read-only (no `.set`/`.remove` on storage) and
+require **no authorization** beyond the standard `require_not_paused` guard
+where noted, so a calling contract needs no signature from the registry's
+admin or any registrant to invoke them:
+
+| Function | Returns | Notes |
+|---|---|---|
+| `get_address(github_username)` | `Option<ContributorRecord>` | Core identity lookup |
+| `has_record(github_username)` | `bool` | Cheap existence check, avoids decoding the full record |
+| `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; fails with `Paused` while the registry is paused |
+| `get_stats()` | `Stats` | `{ total, verified }` |
+| `get_verified_count()` | `u32` | |
+| `get_role(address)` | `Option<Role>` | RBAC lookup, e.g. to gate a payout on `Role::Verifier` |
+| `is_paused()` / `is_contract_paused()` | `bool` | Check before a call that would otherwise fail on `Paused` |
+| `is_registration_in_cooldown(github_username)` | `bool` | |
+| `version()` | `(u32, u32, u32)` | |
+| `is_compatible(major, minor, patch)` | `bool` | Guard the same way a TypeScript client would (see version handshake above) |
+| `max_username_len()`, `is_username_valid(github_username)`, `usernames_match(a, b)` | — | Pure validation helpers, no storage access at all |
+
+`Version::supports_cross_contract_reads()` (`src/version.rs`) gates on this
+surface the same way `supports_batch_verify()` gates on the batched
+verification entry point, for a caller that wants to assert compatibility
+before invoking.
+
+### Not part of this surface: admin exports
+
+`get_all_registered`, `get_registered_page`, and `get_registered_paginated`
+call `admin.require_auth()` internally. A cross-contract invocation executes
+in the *calling* contract's authorization context — it cannot supply the
+registry admin's signature — so these calls will fail auth when invoked from
+another contract, regardless of caller identity. Sibling contracts needing a
+bulk export must go through the admin's own off-chain tooling, not a
+cross-contract call. This is deliberate: the registry has no notion of a
+"trusted contract" allowlist, so widening the export surface would mean any
+deployed contract could exfiltrate the full registry, not just the intended
+consumer.
+
+### Example: a hypothetical payout contract reading verification status
+
+```rust
+// From within another contract's implementation:
+let registry_id: Address = /* stored sibling contract ID */;
+let verified: Option<ContributorRecord> = env.invoke_contract(
+    &registry_id,
+    &Symbol::new(&env, "get_address"),
+    (github_username,).into_val(&env),
+);
+```
+
+No storage migration is required to adopt this: every function above already
+exists in the deployed 1.0.0 ABI, so a v0.1 consumer contract can start
+reading today without waiting on a TrustBridge registry upgrade.
 
 ---
 
