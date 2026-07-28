@@ -161,7 +161,7 @@ Operational teams should:
 Auth gaps on `remove` are high-impact — an unauthorized removal erases a contributor's identity mapping without their consent.
 The full failure surface is documented here and covered by automated unit tests in `src/lib.rs` (search for `#113`).
 
-Cross-reference: [verify/revoke_verification negative matrix](#verify-and-revoke_verification-auth-negative-matrix) · [ABI reference](ABI.md#removecaller-address-github_username-string---resultcontracterrror)
+Cross-reference: [verify/revoke_verification negative matrix](#verify-and-revoke_verification-auth-negative-matrix) (Issue #114) · [ABI reference](ABI.md#removecaller-address-github_username-string---resultcontracterror)
 
 | # | Scenario | Expected error | Code | Test |
 |---|----------|---------------|------|------|
