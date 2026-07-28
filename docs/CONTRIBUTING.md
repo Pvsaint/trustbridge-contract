@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to **trustbridge-contract**! This guide covers setup, workflow, and standards.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md)
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [Testnet Checklist](TESTNET_CHECKLIST.md)
 
 ---
 
@@ -115,9 +115,15 @@ Soroban generates snapshot files in `test_snapshots/` — these are gitignored a
 - [ ] No secrets or `.env` files committed
 - [ ] PR description explains **why** the change is needed
 
----
+## Testnet Deployment Checklist
 
-## CI
+Before promoting to futurenet or mainnet, run the testnet smoke checklist:
+
+```bash
+make testnet-checklist
+```
+
+See [TESTNET_CHECKLIST.md](TESTNET_CHECKLIST.md) for the full numbered steps.
 
 GitHub Actions runs on every push and PR to `main`, `master`, and `develop`:
 

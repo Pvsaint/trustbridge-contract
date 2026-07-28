@@ -2,7 +2,7 @@
 
 Step-by-step instructions for deploying **trustbridge-contract** to Stellar Testnet and Mainnet.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md)
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [Testnet Checklist](TESTNET_CHECKLIST.md) · [Security](SECURITY.md)
 
 ---
 
@@ -82,25 +82,69 @@ stellar contract invoke \
 
 ---
 
+## Testnet Checklist
+
+A repeatable checklist to validate every release build against testnet. See [TESTNET_CHECKLIST.md](TESTNET_CHECKLIST.md) for the full numbered steps.
+
+Required environment variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `NETWORK` | Yes | Must be `testnet` |
+| `ADMIN` | Yes | G-address of the contract admin |
+| `SOURCE` | Yes | Funded testnet CLI identity |
+| `CONTRACT_ID` | After deploy | Recorded from `deployments/testnet.json` |
+
+The checklist covers deploy → initialize → register → verify → export → remove, ending with cleanup. Defaults are safe: `NETWORK` defaults to `testnet`, so a mainnet run requires explicit configuration.
+
+---
+
 ## Mainnet Deployment
 
-Mainnet deployment follows the same flow with additional safeguards:
+### Dual-confirm checklist
+
+Before every mainnet deploy, complete both confirmation steps:
+
+1. **Build hash pin** — confirm the WASM hash matches the tagged release commit:
+   ```bash
+   sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm
+   ```
+   Record the hash in your deploy runbook and verify it against the CI build artifact.
+
+2. **Human confirmation** — set `CONFIRM_MAINNET=yes` to proceed:
+   ```bash
+   export CONFIRM_MAINNET=yes
+   make deploy-mainnet
+   ```
+   The `deploy-mainnet` Makefile target refuses to run unless `CONFIRM_MAINNET` is set to `yes`. This prevents accidental mainnet invocations from a default `make` run.
+
+### Post-deploy verification
+
+After deployment, verify the contract is initialized and operational:
 
 ```bash
-# Use a dedicated ops identity — never reuse testnet keys
-stellar keys generate trustbridge-ops --network mainnet
-# Fund manually via exchange or existing account
+export CONTRACT_ID=$(jq -r .contract_id deployments/mainnet.json)
 
-export ADMIN=G...   # Consider a multisig address
-export SOURCE=trustbridge-ops
+# Confirm the contract is initialized
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source_account deployer \
+  --network mainnet \
+  -- get_stats
+# Expected: { "total": 0, "verified": 0 }
 
-make deploy-mainnet
+# Confirm the deployed WASM hash matches the pinned build hash
+stellar contract get_wasm_hash \
+  --id $CONTRACT_ID \
+  --network mainnet
 ```
 
-**Checklist before mainnet:**
+Checklist before mainnet:
 
 - [ ] Admin address reviewed (prefer multisig)
 - [ ] WASM built from a tagged release commit
+- [ ] Build hash pinned and recorded
+- [ ] `CONFIRM_MAINNET=yes` explicitly set
 - [ ] `cargo test` and CI green on that commit
 - [ ] Contract ID recorded in `deployments/mainnet.json`
 - [ ] TTL extension plan documented for persistent entries
@@ -112,11 +156,14 @@ make deploy-mainnet
 | Target | Description |
 |--------|-------------|
 | `make deploy-testnet` | Build + deploy to testnet |
-| `make deploy-mainnet` | Build + deploy to mainnet |
+| `make deploy-mainnet` | Build + deploy to mainnet (requires `CONFIRM_MAINNET=yes`) |
 | `make invoke-init` | Initialize an existing contract |
 | `make invoke-register` | Register a username |
 | `make invoke-lookup` | Read-only lookup |
 | `make invoke-stats` | Read statistics |
+| `make invoke-verify` | Verify a contributor (admin or verifier role) |
+| `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
+| `make testnet-checklist` | Run the testnet smoke checklist |
 
 Example registration:
 

@@ -272,26 +272,21 @@ stellar contract invoke --id $ID --source admin --network testnet \
 
 Mark a contributor as verified after off-chain GitHub identity confirmation.
 
+Admin authorization is authoritative. The `caller` argument must be the admin or an address granted `Role::Verifier` via `set_role`. A registrant **cannot** self-verify.
+
 | | |
 |---|---|
-| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` |
 | **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
 | **Errors** | `NotInitialized`, `NotRegistered`, `AlreadyVerified`, `NotAuthorized` |
 | **Events** | `VerifiedEvent` |
 
-The `caller` argument is required so the contract can validate which identity
-signed the transaction. Both the admin and any address granted `Role::Verifier`
-via `set_role` may call this function. An address without either role returns
-`NotAuthorized`.
+The `caller` argument enables on-chain role enforcement. Only the contract admin or a `Verifier`-role holder may call this function. An address without either role returns `NotAuthorized`.
 
 ```bash
-# Admin calling verify
+# Admin calling verify (authoritative example)
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- verify --caller G... --github-username octocat
-
-# Verifier-role holder calling verify
-stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
   -- verify --caller G... --github-username octocat
 ```
 
@@ -343,25 +338,21 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 
 Revoke verification for a registered contributor.
 
+Admin authorization is authoritative. The `caller` argument must be the admin or an address granted `Role::Verifier` via `set_role`. A registrant **cannot** revoke another's verification.
+
 | | |
 |---|---|
-| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` |
 | **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
 | **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified`, `NotAuthorized` |
 | **Events** | `VerificationRevokedEvent` |
 
-Like `verify`, the `caller` argument enables on-chain role enforcement. Only
-the contract admin or a `Verifier`-role holder may revoke verification. An
-`Upgrader`-role holder or an address with no role returns `NotAuthorized`.
+Like `verify`, the `caller` argument enables on-chain role enforcement. Only the contract admin or a `Verifier`-role holder may revoke verification. An `Upgrader`-role holder or an address with no role returns `NotAuthorized`.
 
 ```bash
-# Admin revoking verification
+# Admin revoking verification (authoritative example)
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- revoke_verification --caller G... --github-username octocat
-
-# Verifier-role holder revoking verification
-stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
   -- revoke_verification --caller G... --github-username octocat
 ```
 

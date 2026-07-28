@@ -20,7 +20,8 @@ PKG_MANAGER  ?= pnpm
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl
+        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+        testnet-checklist
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -81,8 +82,9 @@ bindings-build: bindings ## Generate and build the TypeScript bindings package
 deploy-testnet: build ## Deploy to Stellar Testnet
 	NETWORK=testnet ADMIN=$(ADMIN) ./scripts/deploy.sh
 
-deploy-mainnet: build ## Deploy to Stellar Mainnet (requires explicit ADMIN)
+deploy-mainnet: build ## Deploy to Stellar Mainnet (requires explicit ADMIN and CONFIRM_MAINNET=yes)
 	@if [ -z "$(ADMIN)" ]; then echo "Set ADMIN to the G-address of the contract admin."; exit 1; fi
+	@if [ "$(CONFIRM_MAINNET)" != "yes" ]; then echo "ERROR: CONFIRM_MAINNET=yes is required for mainnet deployment to prevent accidental mainnet deploys."; exit 1; fi
 	NETWORK=mainnet ADMIN=$(ADMIN) ./scripts/deploy.sh
 
 require-contract-id:
@@ -184,3 +186,15 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 		--network $(NETWORK) \
 		--send=yes \
 		-- set_paused --paused $(PAUSED)
+
+testnet-checklist: ## Run the testnet smoke checklist (see docs/TESTNET_CHECKLIST.md)
+	@echo "=== TrustBridge Testnet Smoke Checklist ==="
+	@echo "1. Build WASM..."
+	$(MAKE) build
+	@echo "2. Deploy to testnet..."
+	$(MAKE) deploy-testnet
+	@echo "3. Verify deployment with get_stats..."
+	@echo "   Run: make invoke-stats CONTRACT_ID=$(CONTRACT_ID) SOURCE=deployer"
+	@echo "4. Run the full checklist:"
+	@echo "   See docs/TESTNET_CHECKLIST.md for the complete numbered steps."
+	@echo "5. Clean up test registrations if needed."
