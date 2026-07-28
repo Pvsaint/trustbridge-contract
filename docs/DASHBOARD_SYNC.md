@@ -51,46 +51,65 @@ Tests for this behavior live alongside the contract in `src/lib.rs`
 (`test_has_record_reflects_registration_state`) and `src/storage.rs`
 (`test_has_record_true_after_set_record`).
 
-## Cross-repo E2E demo
-
-Sibling TrustBridge repos can verify their integration against a live testnet
-contract using the bundled E2E demo:
-
-```bash
-CONTRACT_ID=C... \
-ADMIN=G... \
-E2E_STELLAR_ADDR=G... \
-SOURCE=demo \
-./scripts/demo_e2e.sh
-```
-
-Or via Make:
-
-```bash
-make demo-e2e CONTRACT_ID=C... ADMIN=G... E2E_STELLAR_ADDR=G... SOURCE=demo
-```
-
-The script walks `register → verify → lookup → export` and prints each step.
-It fails fast on any nonzero invoke and never touches mainnet. Secrets stay in
-env; nothing is committed.
-
-## Paginated registry reads (Wave #41)
+## Paginated registry reads (Wave #41 / Issue #143)
 
 `get_all_registered` returns the entire index in one call, which doesn't
-scale as the registry grows. Use `get_registered_page(offset, limit)`
-instead when syncing incrementally — it walks the same admin-gated index but
-in bounded chunks, so a dashboard/indexer sync job can page through without
-risking a resource-limit failure on a large registry. See
-`test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
+scale as the registry grows. Prefer cursor pagination for 100+ contributors
+(see also [issue #1](https://github.com/Stellar-TrustBridge/trustbridge-contract/issues/1)).
 
-## Storage rent estimator inputs (Issue #155)
+### Limit constants (`src/storage.rs`)
 
-Wave budgeting UIs need a stable data shape for **on-chain** storage rent
-(per-user keys, instance overhead, TTL extension schedule) as a function of
-N contributors. That specification — including versioned JSON inputs and an
-explicit split from off-chain indexer storage — lives in:
+| Constant | Value | Behavior |
+|----------|------:|----------|
+| `DEFAULT_PAGE_LIMIT` | `20` | Used when the caller passes `limit = 0` |
+| `MAX_PAGE_LIMIT` | `100` | Hard upper bound per invoke |
 
-- [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md)
-- [storage-rent-estimator.inputs.v1.json](storage-rent-estimator.inputs.v1.json)
+Over-limit requests are **clamped** to `MAX_PAGE_LIMIT` (not rejected). Admin
+authorization on `get_registered_paginated` is unchanged.
 
-Do not fold Horizon/indexer database size into the on-chain rent series.
+### Cursor / page semantics
+
+`get_registered_paginated(cursor, limit)` and `get_public_paginated(cursor, limit)`
+return `ExportPage`:
+
+| Field | Meaning |
+|-------|---------|
+| `records` | Page of `(github_username, ContributorRecord)` |
+| `next_cursor` | `Some(offset)` for the next page, or `None` when exhausted |
+| `total` | Current registry `count` |
+| `has_more` | `true` iff `next_cursor` is `Some` |
+
+`cursor` is a **zero-based index offset** into the username index (not a opaque
+token). Exhaustion: `has_more == false` and `next_cursor == None` (also when
+`cursor >= total`).
+
+### Consumer loop (fetch → process → next cursor → until exhausted)
+
+```text
+cursor = 0
+loop:
+  page = get_registered_paginated(cursor, limit)   # admin
+        # or get_public_paginated(cursor, limit)   # public, respects pause
+  process(page.records)
+  if not page.has_more or page.next_cursor is None:
+    break
+  cursor = page.next_cursor
+```
+
+```bash
+# Admin page (auth required)
+make invoke-export-paginated CONTRACT_ID=$ID SOURCE=admin CURSOR=0 LIMIT=100
+
+# Public page (no admin auth; fails if paused)
+make invoke-public-paginated CONTRACT_ID=$ID CURSOR=0 LIMIT=100
+```
+
+Do **not** use `get_all_registered` once the registry approaches the ~100
+ledger-entry footprint ceiling; page until exhausted instead. ABI details:
+[ABI.md — Paginated export](ABI.md#paginated-export-issue-1--143).
+
+Related unit tests in `src/lib.rs`:
+
+- `test_paginated_export_at_max_page_limit`
+- `test_paginated_export_over_max_page_limit_clamps`
+- `test_get_registered_page_paginates_and_gates_on_admin`

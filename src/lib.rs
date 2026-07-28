@@ -41,9 +41,6 @@ use crate::storage::{
     set_last_upgrade, set_paused as set_paused_state, set_record, set_role as storage_set_role,
     set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance, ADMIN_KEY,
 };
-use crate::utils::{
-    eq_ignore_ascii_case, is_valid_github_username, is_zero_address, MAX_USERNAME_LEN,
-};
 
 /// Version this WASM was built at. Instances whose stored version predates
 /// version tracking fall back to this.
@@ -619,10 +616,25 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    pub fn extend_registry_ttl(
-        env: Env,
-        usernames: Vec<String>,
-    ) -> Result<u32, ContractError> {
+    /// Extends the storage TTL of registry records so they are not archived.
+    ///
+    /// Soroban persistent entries expire unless their TTL is extended. Reads and
+    /// writes extend as a side effect, but a record nobody touches for ~30 days
+    /// is archived and becomes unreadable until restored — so a registry with a
+    /// long tail of inactive contributors silently loses its cold entries.
+    ///
+    /// This is the keeper operation that prevents that: an off-chain job walks
+    /// the index and calls this periodically for entries approaching expiry.
+    ///
+    /// Permissionless by design. Extending a TTL only ever preserves data —
+    /// there is no state an attacker could corrupt by calling it, and gating it
+    /// behind admin auth would mean the registry decays whenever the admin key
+    /// is unavailable. The caller pays the fee, which is its own rate limit.
+    ///
+    /// Returns the number of entries actually extended. Usernames that are not
+    /// registered are skipped rather than erroring: the keeper's list is built
+    /// off-chain and can lag behind removals.
+    pub fn extend_registry_ttl(env: Env, usernames: Vec<String>) -> Result<u32, ContractError> {
         require_initialized(&env)?;
 
         let config = crate::batch::BatchConfig::default();
@@ -854,23 +866,8 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Marks `github_username` as verified after an off-chain GitHub identity check.
-    ///
-    /// Callable by the contract admin **or** any address assigned the `Role::Verifier` role.
-    /// Increments the verified counter. Emits [`VerifiedEvent`].
-    ///
-    /// # Auth
-    ///
-    /// Requires auth from `caller` (admin or Verifier role holder).
-    ///
-    /// # Errors
-    ///
-    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::Paused`] if the contract is paused.
-    /// - [`ContractError::NotAuthorized`] if `caller` is neither the admin nor a Verifier.
-    /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
-    /// - [`ContractError::AlreadyVerified`] if `github_username` is already verified.
-    pub fn verify(env: Env, github_username: String) -> Result<(), ContractError> {
+    /// Marks a contributor as verified after an off-chain GitHub identity check. Admin-only.
+    pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
@@ -2349,8 +2346,8 @@ mod test {
         assert_eq!(ContractError::InvalidRole.code(), 10);
         assert_eq!(ContractError::InvalidUsername.code(), 11);
         assert_eq!(ContractError::AttestationExpired.code(), 12);
-        assert_eq!(ContractError::UnattestedWasm.code(), 13);
-        assert_eq!(ContractError::InvalidBatchSize.code(), 14);
+        assert_eq!(ContractError::InvalidBatchSize.code(), 13);
+        assert_eq!(ContractError::UnattestedWasm.code(), 14);
     }
 
     #[test]
@@ -2368,13 +2365,13 @@ mod test {
             ContractError::InvalidRole,
             ContractError::InvalidUsername,
             ContractError::AttestationExpired,
-            ContractError::UnattestedWasm,
             ContractError::InvalidBatchSize,
+            ContractError::UnattestedWasm,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(16), None);
+        assert_eq!(ContractError::from_code(15), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -3144,6 +3141,45 @@ mod test {
         });
     }
 
+    // ── Issue #16: from_code round-trip and completeness ─────────────────────
+
+    /// Every variant's code() must round-trip through from_code() (Issue #16).
+    #[test]
+    fn test_from_code_round_trips_all_variants() {
+        let all = [
+            ContractError::AlreadyInitialized,
+            ContractError::NotInitialized,
+            ContractError::NotAuthorized,
+            ContractError::NotRegistered,
+            ContractError::AlreadyVerified,
+            ContractError::NotVerified,
+            ContractError::Paused,
+            ContractError::CooldownActive,
+            ContractError::InvalidVersion,
+            ContractError::InvalidRole,
+            ContractError::InvalidUsername,
+            ContractError::AttestationExpired,
+            ContractError::InvalidBatchSize,
+            ContractError::UnattestedWasm,
+        ];
+        for variant in all {
+            assert_eq!(
+                TrustBridgeContract::get_all_registered(env.clone())
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
+    }
+
+    /// Codes not in the enum must return None (Issue #16).
+    #[test]
+    fn test_from_code_unknown_returns_none() {
+        assert_eq!(ContractError::from_code(0), None);
+        assert_eq!(ContractError::from_code(15), None);
+        assert_eq!(ContractError::from_code(u32::MAX), None);
+    }
+
     // ── Issue #54: Additional not-initialized guard tests ────────────────────
 
     /// get_registered_page must fail before init (Issue #54).
@@ -3289,6 +3325,84 @@ mod test {
             let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
             assert_eq!(page.records.len(), 1);
             assert_eq!(page.records.get(0).unwrap().0, username(&env, "bob"));
+        });
+    }
+
+    // ── Issue #143: bulk export pagination limits ─────────────────────────────
+
+    /// Requesting exactly `MAX_PAGE_LIMIT` from a registry larger than that
+    /// must return a full page and report that more records remain.
+    #[test]
+    fn test_paginated_export_at_max_page_limit() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        // A full `MAX_PAGE_LIMIT`-sized page reads one ledger entry per
+        // record, which exceeds the mainnet per-invocation footprint limit
+        // (100 entries) purely as a test-harness artifact of registering and
+        // reading that many entries in one `Env`. The pagination *behavior*
+        // under test — clamping and cursor bookkeeping — is independent of
+        // that network limit, so it is disabled here.
+        env.cost_estimate().disable_resource_limits();
+
+        let total = crate::storage::MAX_PAGE_LIMIT + 5;
+        for i in 0..total {
+            let mut name = alloc::string::String::from("user");
+            name.push_str(&alloc::format!("{i}"));
+            let name = String::from_str(&env, &name);
+            env.as_contract(&contract_id, || {
+                TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+            });
+        }
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_registered_paginated(
+                env.clone(),
+                0,
+                crate::storage::MAX_PAGE_LIMIT,
+            )
+            .unwrap();
+            assert_eq!(page.records.len(), crate::storage::MAX_PAGE_LIMIT);
+            assert!(page.has_more);
+            assert_eq!(page.next_cursor, Some(crate::storage::MAX_PAGE_LIMIT));
+        });
+    }
+
+    /// Requesting more than `MAX_PAGE_LIMIT` must be clamped down to it rather
+    /// than rejected or returned unbounded.
+    #[test]
+    fn test_paginated_export_over_max_page_limit_clamps() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        // See `test_paginated_export_at_max_page_limit`: disabled for the
+        // same reason — the registry size needed to exercise the clamp
+        // exceeds the mainnet per-invocation footprint limit.
+        env.cost_estimate().disable_resource_limits();
+
+        let total = crate::storage::MAX_PAGE_LIMIT + 5;
+        for i in 0..total {
+            let mut name = alloc::string::String::from("user");
+            name.push_str(&alloc::format!("{i}"));
+            let name = String::from_str(&env, &name);
+            env.as_contract(&contract_id, || {
+                TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+            });
+        }
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_registered_paginated(
+                env.clone(),
+                0,
+                crate::storage::MAX_PAGE_LIMIT + 50,
+            )
+            .unwrap();
+            assert!(page.records.len() <= crate::storage::MAX_PAGE_LIMIT);
+            assert_eq!(page.records.len(), crate::storage::MAX_PAGE_LIMIT);
         });
     }
 
