@@ -35,3 +35,45 @@ instead when syncing incrementally — it walks the same admin-gated index but
 in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
+
+## GDPR Data Export & Erasure
+
+To assist with privacy and GDPR compliance, the contract provides hooks and patterns for exporter/erasure processes.
+
+### 1. Data Inventory (On-chain Fields)
+The following fields are stored for each contributor within `ContributorRecord` in persistent storage:
+- `stellar_address` (`Address`): The registered Stellar G-address.
+- `registered_at` (`u64`): Ledger timestamp of the registration/update.
+- `verified` (`bool`): Boolean indicating if the off-chain check was completed.
+
+**Privacy Note:** No personal identifiable information (PII) such as email, phone, name, or GitHub profile link is stored on-chain.
+
+### 2. GDPR Export Hook
+Integrators can retrieve a user's on-chain dataset via `get_address`:
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  -- get_address --github-username <username>
+```
+
+Admins can perform full or chunked exports to back up the registry state for backups or migration audits:
+- **Full Export**: `get_all_registered` (Admin-only)
+- **Paginated Export**: `get_registered_paginated(cursor, limit)` (Admin-only, retrieves records as a JSON bundle)
+
+### 3. Right to Erasure (Deletion Hook)
+To fulfill erasure requests under GDPR, the registrant or the admin can invoke the `remove` function:
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account registrant-or-admin \
+  --network testnet \
+  --send=yes \
+  -- remove --caller <caller_address> --github-username <username>
+```
+Calling `remove`:
+- Deletes the `ContributorRecord` from persistent storage.
+- Cleans up the username from the index list chunks.
+- Decrements the active registration counter and verified counter (if verified).
+- Emits a `RemovedEvent`.

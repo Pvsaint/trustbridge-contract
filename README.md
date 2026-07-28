@@ -35,7 +35,7 @@ This contract provides that mapping **on-chain**:
 | Property | Detail |
 |----------|--------|
 | **Permissionless registration** | Anyone can register their own GitHub username by proving ownership of a Stellar address |
-| **Admin verification** | A designated admin can mark accounts as verified after off-chain GitHub checks |
+| **Admin verification** | A designated admin or verifier can mark accounts as verified after off-chain GitHub checks (no on-chain proof is performed automatically) |
 | **Transparent events** | Every registration, removal, and verification emits a Soroban contract event |
 | **No central DB** | GitHub Actions and the dashboard read directly from the ledger |
 
@@ -251,8 +251,8 @@ More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
 | `get_address(github_username)` | None | ❌ | Lookup by username |
 | `remove(caller, github_username)` | `caller` (registrant or admin) | ✅ | Remove a registration |
 | `get_all_registered()` | Admin | ❌ | Export full registry |
-| `verify(github_username)` | Admin | ✅ | Mark as GitHub-verified |
-| `revoke_verification(github_username)` | Admin | ✅ | Clear a verification |
+| `verify(caller, github_username)` | Admin / Verifier | ✅ | Mark as GitHub-verified |
+| `revoke_verification(caller, github_username)` | Admin / Verifier | ✅ | Clear a verification |
 | `get_verified_count()` | None | ❌ | Verified registration count |
 | `get_stats()` | None | ❌ | `{ total, verified }` |
 | `version()` | None | ❌ | Deployed version as `(major, minor, patch)` |

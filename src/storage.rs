@@ -15,41 +15,14 @@ pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chunkcnt");
+pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
-
-/// Entries per index chunk. Keeps a single chunk read well under the ledger
-/// entry size limit while still amortising reads across pages.
-pub const CHUNK_SIZE: u32 = 100;
-
-/// Page size used when a caller passes `limit = 0`.
-pub const DEFAULT_PAGE_LIMIT: u32 = 50;
-/// Upper bound on a single export page, to keep the response under the
-/// transaction result size limit.
-pub const MAX_PAGE_LIMIT: u32 = 200;
-
-/// Persistent entries are bumped when their remaining TTL drops below this.
-pub const TTL_THRESHOLD: u32 = 100_000;
-/// Ledgers of TTL to restore on bump (~60 days at 5s ledgers).
-pub const TTL_BUMP: u32 = 1_000_000;
+pub const PROV_KEY: Symbol = symbol_short!("prov");
+pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
 pub const VERSION_KEY: Symbol = VER_KEY;
-
-/// Key prefix for chunked username index entries.
-pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-/// Key for the count of chunks in the chunked index.
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
-/// Key for the per-user last-action timestamp (cooldown tracking).
-pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
-
-// ── TTL constants (ledger-based, ~7 days at 5 s/ledger) ─────────────────────
-
-/// Minimum TTL threshold before a bump is triggered (≈ 3 days).
-pub const TTL_THRESHOLD: u32 = 51840;
-/// Target TTL after a bump (≈ 7 days).
-pub const TTL_BUMP: u32 = 120960;
 
 // ── Pagination constants ─────────────────────────────────────────────────────
 
@@ -60,8 +33,6 @@ pub const MAX_PAGE_LIMIT: u32 = 100;
 
 /// Maximum number of usernames per chunk slice.
 pub const CHUNK_SIZE: u32 = 50;
-
-// ── Types ────────────────────────────────────────────────────────────────────
 
 // ─── TTL policy (Wave #7) ────────────────────────────────────────────────────
 //
@@ -129,7 +100,7 @@ pub struct WasmProvenance {
     /// Ledger timestamp the upgrade was applied.
     pub upgraded_at: u64,
     /// Contract version recorded at upgrade time.
-    pub version: (u32, u32, u32),
+    pub version: Option<(u32, u32, u32)>,
     /// Whether the hash had been attested before it was applied.
     pub attested: bool,
 }
@@ -565,37 +536,12 @@ pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
     matches!(get_admin(env), Ok(admin) if admin == *address)
 }
 
-/// Timestamp of `github_username`'s last cooldown-tracked action, or 0 if it
-/// has none. Cooldown is tracked per username rather than globally so one
-/// contributor's activity cannot block everyone else's.
-pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&(LAST_ACT_KEY, github_username.clone()))
-        .unwrap_or(0)
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VER_KEY)
 }
 
-pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
-    let key = (LAST_ACT_KEY, github_username.clone());
-    env.storage().persistent().set(&key, &timestamp);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-/// True when the configured cooldown has not yet elapsed since
-/// `github_username`'s last tracked action. A cooldown of 0 disables the
-/// check entirely.
-pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
-    let cooldown = get_cooldown(env);
-    if cooldown == 0 {
-        return false;
-    }
-    let last = get_last_action(env, github_username);
-    if last == 0 {
-        return false;
-    }
-    env.ledger().timestamp() < last.saturating_add(cooldown)
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
 }
 
 #[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.

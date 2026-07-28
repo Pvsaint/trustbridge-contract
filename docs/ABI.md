@@ -788,6 +788,24 @@ asserts on shape rather than fixed numbers:
 
 ---
 
+## GDPR Privacy & Right to Erasure Hook
+
+For GDPR compliance, the contract maps only technical identifiers: a GitHub username string, a Stellar public address, a registration timestamp, and a verification status boolean. 
+
+### Data Inventory
+The contract stores no personal identifiable information (PII) like names, email addresses, or phone numbers. All data relating to a user is contained in the `ContributorRecord` struct:
+- `stellar_address: Address`
+- `registered_at: u64`
+- `verified: bool`
+
+### Requesting Export
+A user can export their on-chain registry data by invoking `get_address` (publicly available). Admins can export all registrations via `get_all_registered` or page-by-page via `get_registered_paginated`.
+
+### Erasing Data
+To fulfill a GDPR "Right to Erasure" request, a user or admin should call the `remove` function. Calling `remove` deletes the user's `ContributorRecord` entry from persistent storage and cleans up the index reference, deleting all trace of the mapping on the active ledger state.
+
+---
+
 ## CLI Tips
 
 - Use `--` to separate Stellar CLI flags from contract arguments

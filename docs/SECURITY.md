@@ -53,6 +53,36 @@ The admin address is **immutable** after `initialize`. Recommendations:
 
 ---
 
+## Username Squatting Mitigations
+
+Because Soroban handles GitHub registrations permissionlessly (first-come, first-registered), there is a risk of username squatting (someone registering another contributor's GitHub username to redirect their rewards). TrustBridge uses a multi-layered security model to mitigate this risk.
+
+### 1. Mandatory Admin Verification Gate
+Registration alone does **not** grant payout readiness. Payout systems and the TrustBridge dashboard require a contributor record to be **verified** before rewards can be disbursed.
+- Verification is performed by the contract admin or a designated verifier after confirming ownership of the GitHub account off-chain (e.g., via OAuth or a cryptographic proof).
+- The verifier validates that the registered Stellar address matches the authenticated GitHub user.
+- If a squatter registers a name, they cannot pass this verification gate since they cannot prove ownership of the corresponding GitHub account.
+
+### 2. Double-Auth Transfer Protection (Self-Auth)
+If a user registers a username and later needs to transfer it to a different Stellar address, the contract requires **both** of the following to authorize the transaction:
+1. The new Stellar address.
+2. The currently registered Stellar address.
+This prevents a third party from maliciously taking over a registered username.
+
+### 3. Contributor Dispute & Resolution Flow
+If a rightful owner discovers that their GitHub username has been squatted on-chain:
+1. **Report**: The owner reports the dispute to the TrustBridge administrators (off-chain).
+2. **Revocation/Removal**: The admin verifies the owner's identity, then calls `remove` to delete the squatter's record from the contract registry.
+3. **Re-registration**: The rightful owner registers their correct Stellar address.
+4. **Re-verification**: The admin verifies the new record.
+
+### FAQ: "Someone registered my GitHub name, what should I do?"
+- **Will they receive my payouts?** No. Payouts require the record to be verified. The squatter cannot pass the admin verification check.
+- **How do I reclaim my username?** Open a support ticket / dispute with the TrustBridge administrators. They will remove the squatter's record so you can register your address.
+- **Does the contract verify my GitHub handle automatically?** No. There is **no on-chain verification proof** of GitHub identity at registration time. Verification is entirely off-chain/administrative.
+
+---
+
 ## Input Validation
 
 `register` validates the username **before** `require_auth()` and before any

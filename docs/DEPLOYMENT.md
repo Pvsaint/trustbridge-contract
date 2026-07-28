@@ -148,6 +148,37 @@ INIT=true \
 
 ---
 
+## Contract Upgrades & Schema Migrations
+
+During a contract upgrade, operators must maintain the integrity of the contract schema. Upgrade harnesses and runbooks depend on a single source of truth for migration state on-chain.
+
+### 1. Verify Current Schema Version
+To check the current deployed version before upgrading:
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  -- version
+```
+This returns the `(major, minor, patch)` version tuple from the `Symbol("ver")` storage key (falling back to `(1, 0, 0)` if the instance was initialized prior to version tracking).
+
+### 2. Execute Upgrade & Migrate
+After the new WASM code is deployed:
+1. The admin upgrades the WASM via the `upgrade` target.
+2. The admin bumps the on-chain version schema by executing the `migrate` function:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID \
+     --source-account admin-identity \
+     --network testnet \
+     --send=yes \
+     -- migrate --new_version "(1, 1, 0)"
+   ```
+   *(Note: The `new_version` tuple must be strictly greater than the current version.)*
+
+---
+
 ## Troubleshooting
 
 ### `wasm32v1-none` target not installed
