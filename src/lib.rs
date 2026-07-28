@@ -1,4 +1,13 @@
 #![no_std]
+// Clippy pedantic rollout — Phase 1 (warn-only while fixes land incrementally).
+// See docs/CLIPPY_PEDANTIC_PLAN.md for the full phased plan and allow-list policy.
+#![warn(
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::redundant_closure_for_method_calls,
+    clippy::cloned_instead_of_copied,
+)]
 
 mod audit;
 mod batch;

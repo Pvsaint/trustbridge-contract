@@ -85,6 +85,20 @@ Update CI to Stellar CLI 26.1.0
 
 ---
 
+## Clippy Lint Policy
+
+The full plan is in [docs/CLIPPY_PEDANTIC_PLAN.md](CLIPPY_PEDANTIC_PLAN.md). Summary:
+
+- Default lint gate: `cargo clippy --all-targets -- -D warnings` (enforced in CI and `make lint`).
+- Phase 1 pedantic lints are active as `warn` in `src/lib.rs`; they will be promoted to `deny`
+  once the fix PRs land.
+- Any `#[allow(clippy::*)]` attribute **must** have an inline comment explaining why.
+  Bare `allow` attributes without rationale are rejected in code review.
+- Do not add `#![allow(clippy::pedantic)]` or `#![allow(clippy::nursery)]` at the crate level —
+  enable and fix lints individually per the phased plan.
+
+---
+
 ## Testing Guidelines
 
 Required test coverage for new behavior:
