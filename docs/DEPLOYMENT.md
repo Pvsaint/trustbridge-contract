@@ -164,6 +164,7 @@ Checklist before mainnet:
 | `make invoke-verify` | Verify a contributor (admin or verifier role) |
 | `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
 | `make testnet-checklist` | Run the testnet smoke checklist |
+| `make demo-e2e` | Run the cross-repo E2E demo (register → verify → lookup → export) |
 
 Example registration:
 
@@ -171,6 +172,22 @@ Example registration:
 export CONTRACT_ID=C...
 make invoke-register GITHUB_USER=octocat STELLAR_ADDR=G... SOURCE=deployer
 ```
+
+Equivalent raw CLI invocation:
+
+```bash
+stellar contract invoke --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  --send=yes \
+  -- register \
+  --github-username octocat \
+  --stellar-address G...
+```
+
+`register` requires the source account to authenticate as `stellar-address`. If the
+username is already registered to a different address, that previous address must
+also sign. See [ABI.md](ABI.md#register) for full auth requirements and failure modes.
 
 ---
 

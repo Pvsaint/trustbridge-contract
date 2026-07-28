@@ -24,43 +24,13 @@ pub const EMERGENCY_PAUSE_TS_KEY: Symbol = symbol_short!("emerg_ts");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
-pub const PROV_KEY: Symbol = symbol_short!("prov");
-pub const ATTEST_KEY: Symbol = symbol_short!("attn");
-
-/// Key prefix for chunked username index entries.
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-/// Key for the count of chunks in the chunked index.
 pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
-/// Key for the per-user last-action timestamp (cooldown tracking).
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
+pub const PROV_KEY: Symbol = symbol_short!("prov");
+pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
 // ── TTL constants (ledger-based, ~7 days at 5 s/ledger) ─────────────────────
-
-/// Minimum TTL threshold before a bump is triggered (≈ 3 days).
-pub const TTL_THRESHOLD: u32 = 51840;
-/// Target TTL after a bump (≈ 7 days).
-pub const TTL_BUMP: u32 = 120960;
-
-// ── Pagination constants ─────────────────────────────────────────────────────
-
-pub const DEFAULT_PAGE_LIMIT: u32 = 20;
-pub const MAX_PAGE_LIMIT: u32 = 100;
-
-// ── Chunked-index constants ──────────────────────────────────────────────────
-
-/// Maximum number of usernames per chunk slice.
-pub const CHUNK_SIZE: u32 = 50;
-
-// ── Types ────────────────────────────────────────────────────────────────────
-
-// ─── TTL policy (Wave #7) ────────────────────────────────────────────────────
-//
-// Soroban persistent entries expire and are archived unless their TTL is
-// extended. `get_record` and `set_record` already call `extend_ttl` with the two
-// constants below, but neither was ever defined — so the TTL policy this
-// contract claims to have had no actual values behind it.
-//
-// Stellar closes a ledger roughly every 5 seconds, so ~17,280 ledgers is a day.
 
 /// Ledgers per day at the ~5s close time, used to express the policy in days.
 pub const LEDGERS_PER_DAY: u32 = 17_280;
@@ -77,6 +47,23 @@ pub const TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 30;
 /// Comfortably inside the network's maximum persistent TTL, so an extension is
 /// never rejected for overshooting the cap.
 pub const TTL_BUMP: u32 = LEDGERS_PER_DAY * 90;
+
+// ── Pagination constants ─────────────────────────────────────────────────────
+
+/// Page size used when a caller passes `limit = 0`.
+pub const DEFAULT_PAGE_LIMIT: u32 = 20;
+/// Upper bound on a single export page, to keep the response under the
+/// transaction result size limit.
+pub const MAX_PAGE_LIMIT: u32 = 100;
+
+// ── Chunked-index constants ──────────────────────────────────────────────────
+
+/// Maximum number of usernames per chunk slice.
+pub const CHUNK_SIZE: u32 = 50;
+
+// ── Username validation ──────────────────────────────────────────────────────
+
+// ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
@@ -105,8 +92,8 @@ pub struct ContributorRecord {
 ///
 /// This is the answer as a single readable record. `previous_wasm_hash` is what
 /// makes it a chain rather than a snapshot: each record names its predecessor,
-/// so the lineage can be walked backwards through historical events even though
-/// only the head is stored.
+/// so the lineage can be walked backwards through historical `UpgradedEvent`s
+/// even though only the head is stored.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct WasmProvenance {
@@ -169,6 +156,14 @@ pub fn require_initialized(env: &Env) -> Result<(), ContractError> {
         Ok(())
     } else {
         Err(ContractError::NotInitialized)
+    }
+}
+
+pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+    if is_paused(env) {
+        Err(ContractError::Paused)
+    } else {
+        Ok(())
     }
 }
 
@@ -256,14 +251,26 @@ pub fn set_index(env: &Env, index: &Vec<String>) {
     env.storage().instance().set(&INDEX_KEY, index);
 }
 
-/// Returns a page of usernames from the flat index starting at `offset`.
+/// Returns a slice of the username index: up to `limit` entries starting at
+/// `offset`. Out-of-range offsets yield an empty page rather than an error.
 pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
     let index = get_index(env);
     let mut page = Vec::new(env);
-    let end = (offset.saturating_add(limit)).min(index.len());
+
+    let effective_limit = if limit == 0 {
+        DEFAULT_PAGE_LIMIT
+    } else {
+        limit.min(MAX_PAGE_LIMIT)
+    };
+
+    if offset >= index.len() {
+        return page;
+    }
+
+    let end = offset.saturating_add(effective_limit).min(index.len());
     for i in offset..end {
-        if let Some(u) = index.get(i) {
-            page.push_back(u);
+        if let Some(username) = index.get(i) {
+            page.push_back(username);
         }
     }
     page
@@ -371,31 +378,6 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
             break;
         }
     }
-}
-
-/// Returns a slice of the username index: up to `limit` entries starting at
-/// `offset`. Out-of-range offsets yield an empty page rather than an error.
-pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
-    let index = get_index(env);
-    let mut page = Vec::new(env);
-
-    let effective_limit = if limit == 0 {
-        DEFAULT_PAGE_LIMIT
-    } else {
-        limit.min(MAX_PAGE_LIMIT)
-    };
-
-    if offset >= index.len() {
-        return page;
-    }
-
-    let end = offset.saturating_add(effective_limit).min(index.len());
-    for i in offset..end {
-        if let Some(username) = index.get(i) {
-            page.push_back(username);
-        }
-    }
-    page
 }
 
 // Paginated export implementation (Issue #1 & #3)
@@ -571,8 +553,7 @@ pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
     if last == 0 {
         return false;
     }
-    let now = env.ledger().timestamp();
-    now < last.saturating_add(cooldown)
+    env.ledger().timestamp() < last.saturating_add(cooldown)
 }
 
 pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
@@ -641,40 +622,7 @@ pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
     matches!(get_admin(env), Ok(admin) if admin == *address)
 }
 
-/// Timestamp of `github_username`'s last cooldown-tracked action, or 0 if it
-/// has none. Cooldown is tracked per username rather than globally so one
-/// contributor's activity cannot block everyone else's.
-pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&(LAST_ACT_KEY, github_username.clone()))
-        .unwrap_or(0)
-}
-
-pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
-    let key = (LAST_ACT_KEY, github_username.clone());
-    env.storage().persistent().set(&key, &timestamp);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-/// True when the configured cooldown has not yet elapsed since
-/// `github_username`'s last tracked action. A cooldown of 0 disables the
-/// check entirely.
-pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
-    let cooldown = get_cooldown(env);
-    if cooldown == 0 {
-        return false;
-    }
-    let last = get_last_action(env, github_username);
-    if last == 0 {
-        return false;
-    }
-    env.ledger().timestamp() < last.saturating_add(cooldown)
-}
-
-#[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.
+/// True when `address` is the contract admin or holds `expected_role`.
 pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
     if let Ok(admin) = get_admin(env) {
         if *address == admin {
@@ -688,31 +636,22 @@ pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> b
     }
 }
 
-// ── Index-length invariant (Issue #59 / Wave #60) ────────────────────────────
-//
-// The registry maintains two parallel counters:
-//   1. `COUNT_KEY`  — the u32 stored by `set_count` / read by `get_count`.
-//   2. `INDEX_KEY`  — the Vec<String> stored by `set_index` / read by `get_index`.
-//
-// Both must be updated atomically inside every `register` and `remove` call.
-// If either update is skipped — e.g. the index is extended but the counter is
-// not, or the counter is decremented but the username is not removed from the
-// index — the invariant breaks and callers that rely on one for bounds-checking
-// will diverge from callers that read the other.
-//
-// `index_length_invariant_holds` captures this in a single readable boolean so
-// test code and any future on-chain self-check can express the invariant
-// without repeating its definition.
+// ── Pause state ──────────────────────────────────────────────────────────────
 
-/// Returns `true` when the flat username index length equals the stored
-/// registration count.
-///
-/// This is the index-length invariant: `get_count(env) == get_index(env).len()`.
-/// Both sides are updated inside every `register` and `remove` call, and they
-/// must stay equal at every quiescent point (between transactions).
-///
-/// Used by the test suite to assert the invariant holds after every
-/// state-mutating operation, and by audit tooling to spot-check live state.
-pub fn index_length_invariant_holds(env: &Env) -> bool {
-    get_count(env) == get_index(env).len()
+pub fn is_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&PAUSED_KEY, &paused);
+}
+
+// ── Version ──────────────────────────────────────────────────────────────────
+
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VER_KEY)
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VER_KEY, &version);
 }

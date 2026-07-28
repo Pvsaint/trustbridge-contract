@@ -105,7 +105,69 @@ cargo test
 
 Soroban generates snapshot files in `test_snapshots/` — these are gitignored and regenerated locally.
 
----
+## Writing Contract Tests
+
+This repo uses the Soroban SDK test host. Tests live in `src/lib.rs` inside
+`#[cfg(test)] mod test` for unit tests and in `tests/integration.rs` for
+integration tests.
+
+### Test host setup
+
+Every test starts with an `Env` and a deployed contract instance:
+
+```rust
+let env = Env::default();
+let admin = Address::generate(&env);
+let user = Address::generate(&env);
+let contract_id = env.register(TrustBridgeContract, ());
+env.as_contract(&contract_id, || {
+    TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+});
+```
+
+`env.mock_all_auths()` disables signature checks for the current frame, so you
+can call admin-only entry points without constructing real key pairs:
+
+```rust
+env.mock_all_auths();
+env.as_contract(&contract_id, || {
+    TrustBridgeContract::register(env.clone(), username, user.clone()).unwrap();
+});
+```
+
+When you need to test an auth failure, clear the mocked auths:
+
+```rust
+env.set_auths(&[]);
+let result = client.try_register(&name, &other);
+assert!(result.is_err());
+```
+
+### Common patterns in this repo
+
+- **Storage helpers** live in `src/storage.rs`. Call them directly when you want
+  to inspect or construct state without going through the public ABI.
+- **Events** are asserted via `env.events().all()`. Compare against a fully
+  populated event struct so topic symbols and data fields are pinned.
+- **Ledger control**: `env.ledger().set_timestamp(ts)` is useful when an event
+  payload includes a timestamp you want to assert exactly.
+
+### Exemplar tests to study
+
+| Test file | Test name | What it covers |
+|---|---|---|
+| `src/lib.rs` | `test_register_and_get_address_roundtrip` | Basic register + lookup |
+| `src/lib.rs` | `test_removed_event_payload_is_complete` | Event topic + data shape |
+| `src/lib.rs` | `test_register_transfer_requires_current_owner_auth` | Auth enforcement |
+| `src/lib.rs` | `test_verifier_role_can_verify` | Role-based access |
+| `tests/integration.rs` | `test_integration_full_registry_lifecycle_and_events` | End-to-end lifecycle |
+
+### Snapshot policy
+
+Soroban may emit snapshot files under `test_snapshots/` when an event or type
+layout changes. These files are gitignored. If `cargo test` fails with a
+snapshot mismatch after an intentional ABI change, delete the stale snapshot and
+re-run — the test suite will regenerate it.
 
 ## Pull Request Checklist
 

@@ -22,7 +22,7 @@ PKG_MANAGER  ?= pnpm
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-max-username fmt lint check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
-        testnet-checklist
+        testnet-checklist demo-e2e
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -109,6 +109,12 @@ invoke-init: require-contract-id ## Initialize contract (CONTRACT_ID and ADMIN r
 		-- initialize --admin $(ADMIN)
 
 invoke-register: require-contract-id ## Register a GitHub username (GITHUB_USER, STELLAR_ADDR, CONTRACT_ID)
+	@if [ -z "$(GITHUB_USER)" ]; then \
+		echo "ERROR: set GITHUB_USER=<username> for this target."; exit 1; \
+	fi
+	@if [ -z "$(STELLAR_ADDR)" ]; then \
+		echo "ERROR: set STELLAR_ADDR=<G...> for this target."; exit 1; \
+	fi
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
@@ -190,7 +196,7 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		--send=yes \
-		-- set_paused --paused $(PAUSED)
+ 	-- set_paused --paused $(PAUSED)
 
 testnet-checklist: ## Run the testnet smoke checklist (see docs/TESTNET_CHECKLIST.md)
 	@echo "=== TrustBridge Testnet Smoke Checklist ==="
@@ -203,3 +209,15 @@ testnet-checklist: ## Run the testnet smoke checklist (see docs/TESTNET_CHECKLIS
 	@echo "4. Run the full checklist:"
 	@echo "   See docs/TESTNET_CHECKLIST.md for the complete numbered steps."
 	@echo "5. Clean up test registrations if needed."
+
+demo-e2e: ## Run the cross-repo E2E demo (see scripts/demo_e2e.sh)
+	@if [ -z "$(CONTRACT_ID)" ]; then \
+		echo "ERROR: set CONTRACT_ID=<C...> for this target."; exit 1; \
+	fi
+	@if [ -z "$(ADMIN)" ]; then \
+		echo "ERROR: set ADMIN to the G-address of the contract admin."; exit 1; \
+	fi
+	@if [ -z "$(E2E_STELLAR_ADDR)" ]; then \
+		echo "ERROR: set E2E_STELLAR_ADDR=<G...> for the demo registration."; exit 1; \
+	fi
+	bash scripts/demo_e2e.sh

@@ -64,7 +64,8 @@ fn test_integration_full_registry_lifecycle_and_events() {
     // Revoke verification (Issue #12 — admin as caller)
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice"))
+            .unwrap();
     });
 
     env.as_contract(&contract_id, || {
@@ -124,7 +125,9 @@ fn test_integration_pause_unpause_governance() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone()).is_ok());
+        assert!(
+            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone()).is_ok()
+        );
     });
 }
 
@@ -144,8 +147,14 @@ fn test_integration_role_based_access_control() {
     });
 
     env.as_contract(&contract_id, || {
-        assert_eq!(TrustBridgeContract::get_role(env.clone(), user1.clone()), Some(Role::Upgrader));
-        assert_eq!(TrustBridgeContract::get_role(env.clone(), user2.clone()), Some(Role::Verifier));
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), user1.clone()),
+            Some(Role::Upgrader)
+        );
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), user2.clone()),
+            Some(Role::Verifier)
+        );
     });
 
     env.mock_all_auths();
@@ -154,7 +163,10 @@ fn test_integration_role_based_access_control() {
     });
 
     env.as_contract(&contract_id, || {
-        assert_eq!(TrustBridgeContract::get_role(env.clone(), user1.clone()), None);
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), user1.clone()),
+            None
+        );
     });
 }
 
@@ -177,14 +189,23 @@ fn test_integration_verifier_role_separation() {
         TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "octocat")).unwrap();
     });
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "octocat")).unwrap().verified);
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"))
+                .unwrap()
+                .verified
+        );
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "octocat")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "octocat"))
+            .unwrap();
     });
     env.as_contract(&contract_id, || {
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "octocat")).unwrap().verified);
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"))
+                .unwrap()
+                .verified
+        );
     });
 }
 
@@ -219,11 +240,15 @@ fn test_integration_lookup_after_peer_removal() {
         // bob and carol must still be accessible
         assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).is_none());
         assert_eq!(
-            TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap().stellar_address,
+            TrustBridgeContract::get_address(env.clone(), s(&env, "bob"))
+                .unwrap()
+                .stellar_address,
             user2
         );
         assert_eq!(
-            TrustBridgeContract::get_address(env.clone(), s(&env, "carol")).unwrap().stellar_address,
+            TrustBridgeContract::get_address(env.clone(), s(&env, "carol"))
+                .unwrap()
+                .stellar_address,
             user3
         );
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 2);
@@ -254,8 +279,8 @@ fn test_integration_export_consistent_after_removal() {
             }
             v
         };
-        assert!(names.contains(&s(&env, "alice")));
-        assert!(names.contains(&s(&env, "carol")));
+        assert!(names.contains(s(&env, "alice")));
+        assert!(names.contains(s(&env, "carol")));
     });
 }
 
@@ -344,8 +369,16 @@ fn test_integration_verification_attestation_storage() {
 
     env.as_contract(&contract_id, || {
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap().verified);
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap().verified);
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "alice"))
+                .unwrap()
+                .verified
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "bob"))
+                .unwrap()
+                .verified
+        );
     });
 
     env.mock_all_auths();
@@ -354,9 +387,17 @@ fn test_integration_verification_attestation_storage() {
     });
     env.as_contract(&contract_id, || {
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
-        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap().verified);
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap().verified,
-            "bob's verification status must be unaffected by alice's verification");
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "alice"))
+                .unwrap()
+                .verified
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "bob"))
+                .unwrap()
+                .verified,
+            "bob's verification status must be unaffected by alice's verification"
+        );
     });
 
     env.mock_all_auths();
@@ -369,13 +410,22 @@ fn test_integration_verification_attestation_storage() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice"))
+            .unwrap();
     });
     env.as_contract(&contract_id, || {
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap().verified);
-        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap().verified,
-            "bob must remain verified after alice's revocation");
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "alice"))
+                .unwrap()
+                .verified
+        );
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "bob"))
+                .unwrap()
+                .verified,
+            "bob must remain verified after alice's revocation"
+        );
     });
 
     env.mock_all_auths();
@@ -407,7 +457,10 @@ fn test_integration_attestation_preserved_on_same_address_reregister() {
     });
     env.as_contract(&contract_id, || {
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap();
-        assert!(record.verified, "same-address re-register must preserve attestation");
+        assert!(
+            record.verified,
+            "same-address re-register must preserve attestation"
+        );
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
     });
 }
@@ -590,9 +643,9 @@ fn test_integration_paginated_export_after_multiple_removals() {
 
     for (name, addr) in [
         (s(&env, "alice"), user1.clone()),
-        (s(&env, "bob"),   user2.clone()),
+        (s(&env, "bob"), user2.clone()),
         (s(&env, "carol"), user3.clone()),
-        (s(&env, "dave"),  user4.clone()),
+        (s(&env, "dave"), user4.clone()),
     ] {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
@@ -646,7 +699,11 @@ fn test_integration_public_paginated_after_peer_removal() {
     });
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
-        assert_eq!(page.records.len(), 2, "public paginated must skip removed bob");
+        assert_eq!(
+            page.records.len(),
+            2,
+            "public paginated must skip removed bob"
+        );
         let names: soroban_sdk::Vec<String> = {
             let mut v = soroban_sdk::Vec::new(&env);
             for i in 0..page.records.len() {
@@ -654,8 +711,8 @@ fn test_integration_public_paginated_after_peer_removal() {
             }
             v
         };
-        assert!(names.contains(&s(&env, "alice")));
-        assert!(names.contains(&s(&env, "carol")));
+        assert!(names.contains(s(&env, "alice")));
+        assert!(names.contains(s(&env, "carol")));
     });
 }
 
@@ -680,14 +737,18 @@ fn test_integration_revoked_verifier_cannot_verify() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "alice"))
+            .unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::remove_role(env.clone(), verifier.clone()).unwrap();
     });
     env.as_contract(&contract_id, || {
-        assert_eq!(TrustBridgeContract::get_role(env.clone(), verifier.clone()), None);
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), verifier.clone()),
+            None
+        );
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -724,7 +785,11 @@ fn test_integration_upgrader_cannot_verify_or_revoke() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::revoke_verification(env.clone(), upgrader.clone(), s(&env, "alice")),
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                upgrader.clone(),
+                s(&env, "alice")
+            ),
             Err(ContractError::NotAuthorized),
             "Upgrader must not revoke verification"
         );
@@ -761,21 +826,46 @@ fn test_integration_attestation_record_fields_isolated() {
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
     });
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap().verified);
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap().verified,
-            "bob must remain unverified");
-        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "carol")).unwrap().verified);
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "alice"))
+                .unwrap()
+                .verified
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "bob"))
+                .unwrap()
+                .verified,
+            "bob must remain unverified"
+        );
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "carol"))
+                .unwrap()
+                .verified
+        );
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 2);
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "carol"))
+            .unwrap();
     });
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap().verified,
-            "alice must remain verified after carol revocation");
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap().verified);
-        assert!(!TrustBridgeContract::get_address(env.clone(), s(&env, "carol")).unwrap().verified);
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "alice"))
+                .unwrap()
+                .verified,
+            "alice must remain verified after carol revocation"
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "bob"))
+                .unwrap()
+                .verified
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "carol"))
+                .unwrap()
+                .verified
+        );
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
     });
 }
@@ -795,21 +885,22 @@ fn test_integration_vcount_never_underflows() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice"))
+            .unwrap();
     });
     env.as_contract(&contract_id, || {
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let result = TrustBridgeContract::revoke_verification(
-            env.clone(),
-            admin.clone(),
-            s(&env, "alice"),
-        );
+        let result =
+            TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice"));
         assert_eq!(result, Err(ContractError::NotVerified));
-        assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0,
-            "vcount must not underflow below zero");
+        assert_eq!(
+            TrustBridgeContract::get_verified_count(env.clone()),
+            0,
+            "vcount must not underflow below zero"
+        );
     });
 }
 
@@ -854,7 +945,8 @@ fn test_integration_stats_verified_matches_verified_count() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice"))
+            .unwrap();
     });
     check(&env, &contract_id);
 

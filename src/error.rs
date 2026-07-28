@@ -17,6 +17,12 @@ pub enum ContractError {
     /// The supplied GitHub username is empty, longer than
     /// `utils::MAX_USERNAME_LEN`, or contains characters GitHub does not allow.
     InvalidUsername = 11,
+    /// A WASM upgrade attestation was found but has expired.
+    AttestationExpired = 12,
+    /// The supplied WASM hash does not match the live attestation.
+    UnattestedWasm = 13,
+    /// The batch size exceeds the configured maximum.
+    InvalidBatchSize = 14,
 }
 
 impl ContractError {
@@ -41,6 +47,9 @@ impl ContractError {
             9 => Some(ContractError::InvalidVersion),
             10 => Some(ContractError::InvalidRole),
             11 => Some(ContractError::InvalidUsername),
+            12 => Some(ContractError::AttestationExpired),
+            13 => Some(ContractError::UnattestedWasm),
+            14 => Some(ContractError::InvalidBatchSize),
             _ => None,
         }
     }
@@ -51,18 +60,21 @@ impl ContractError {
 // without depending on the Rust enum layout.
 //
 // | Code | Variant             | Raised by                          |
-// |------|----------------------|-------------------------------------|
-// | 1    | AlreadyInitialized   | initialize                         |
-// | 2    | NotInitialized       | register, remove, get_all_registered, verify, revoke_verification |
-// | 3    | NotAuthorized        | remove, verify, revoke_verification |
-// | 4    | NotRegistered        | remove, verify, revoke_verification |
-// | 5    | AlreadyVerified      | verify                             |
-// | 6    | NotVerified          | revoke_verification                |
-// | 7    | Paused               | any state-mutating call while paused |
-// | 8    | CooldownActive       | upgrade                            |
-// | 9    | InvalidVersion       | migrate                            |
-// | 10   | InvalidRole          | set_role                           |
-// | 11   | InvalidUsername      | register                           |
+// |------|---------------------|------------------------------------|
+// | 1    | AlreadyInitialized  | initialize                         |
+// | 2    | NotInitialized      | register, remove, get_all_registered, verify, revoke_verification |
+// | 3    | NotAuthorized       | remove, verify, revoke_verification |
+// | 4    | NotRegistered       | remove, verify, revoke_verification |
+// | 5    | AlreadyVerified     | verify                             |
+// | 6    | NotVerified         | revoke_verification                |
+// | 7    | Paused              | any state-mutating call while paused |
+// | 8    | CooldownActive      | upgrade                            |
+// | 9    | InvalidVersion      | migrate                            |
+// | 10   | InvalidRole         | set_role                           |
+// | 11   | InvalidUsername     | register                           |
+// | 12   | AttestationExpired  | attest_upgrade, upgrade            |
+// | 13   | UnattestedWasm      | upgrade                            |
+// | 14   | InvalidBatchSize    | batch_verify, extend_registry_ttl  |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.
