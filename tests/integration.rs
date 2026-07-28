@@ -409,6 +409,14 @@ fn test_integration_attestation_preserved_on_same_address_reregister() {
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap();
         assert!(record.verified, "same-address re-register must preserve attestation");
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+
+        // This documents the intended behavior for unchanged addresses: a
+        // re-register with the same Stellar address should leave the existing
+        // verification state and counters intact.
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.verified, 1);
+        assert_eq!(stats.total - stats.verified, 0);
     });
 }
 
@@ -435,6 +443,15 @@ fn test_integration_attestation_cleared_on_address_change() {
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap();
         assert!(!record.verified, "address change must clear attestation");
         assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+
+        // This documents the intended future behavior for address changes:
+        // re-registering the same username at a new Stellar address should put
+        // the contributor back into the unverified set while keeping the total
+        // registration count unchanged.
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.verified, 0);
+        assert_eq!(stats.total - stats.verified, 1);
     });
 }
 
