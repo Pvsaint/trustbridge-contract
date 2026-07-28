@@ -11,6 +11,11 @@ pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
 pub const INDEX_KEY: Symbol = symbol_short!("idx");
 pub const PAUSED_KEY: Symbol = symbol_short!("pause");
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
+// Pending reverify flag per username
+pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
+// Emergency pause flag and timestamp
+pub const EMERGENCY_PAUSE_KEY: Symbol = symbol_short!("emerg_pause");
+pub const EMERGENCY_PAUSE_TS_KEY: Symbol = symbol_short!("emerg_ts");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
 pub const ROLE_KEY: Symbol = symbol_short!("role");
@@ -468,7 +473,40 @@ pub fn get_cooldown(env: &Env) -> u64 {
     env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
 }
 
+pub fn get_emergency_pause(env: &Env) -> bool {
+    env.storage().instance().get(&EMERGENCY_PAUSE_KEY).unwrap_or(false)
+}
+
+pub fn set_emergency_pause(env: &Env, flag: bool) {
+    env.storage().instance().set(&EMERGENCY_PAUSE_KEY, &flag);
+}
+
+pub fn get_emergency_pause_ts(env: &Env) -> u64 {
+    env.storage().instance().get(&EMERGENCY_PAUSE_TS_KEY).unwrap_or(0)
+}
+
+pub fn set_emergency_pause_ts(env: &Env, ts: u64) {
+    env.storage().instance().set(&EMERGENCY_PAUSE_TS_KEY, &ts);
+}
+
 pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
+    env.storage().instance().set(&COOLDOWN_KEY, &cooldown_seconds);
+}
+
+pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
+    let key = (PENDING_REVERIFY_KEY, github_username.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+pub fn set_pending_reverify(env: &Env, github_username: &String, flag: bool) {
+    let key = (PENDING_REVERIFY_KEY, github_username.clone());
+    env.storage().persistent().set(&key, &flag);
+}
+
+pub fn clear_pending_reverify(env: &Env, github_username: &String) {
+    let key = (PENDING_REVERIFY_KEY, github_username.clone());
+    env.storage().persistent().remove(&key);
+}
     env.storage()
         .instance()
         .set(&COOLDOWN_KEY, &cooldown_seconds);
