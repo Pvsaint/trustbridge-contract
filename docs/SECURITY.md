@@ -89,6 +89,14 @@ Auth reminder (see also [ABI.md](ABI.md)):
   the verified count decreases, and any later `verify()` applies to the new
   address only.
 
+### Future registration cooldown proposal
+
+A registration cooldown is a planned design proposal for a future contract version. It is not part of the current contract behavior.
+
+- Cooldown reduces rapid registration spam by rejecting repeated `register()` calls for the same username within a ledger timestamp window.
+- It also reduces username squatting churn by making repeated remove/re-register cycles more expensive.
+- No current contract logic or storage behavior changes are introduced by this proposal; it is documented here as a design consideration only.
+
 ---
 
 ## Username Squatting Mitigations
