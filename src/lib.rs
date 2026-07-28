@@ -637,6 +637,10 @@ impl TrustBridgeContract {
     }
 
     /// Toggles contract pause state. Admin-only (Issue #3).
+    ///
+    /// Operators use this as the read-only upgrade window switch: set
+    /// `paused = true` before rotating the WASM hash so mutating calls fail
+    /// fast, then set it back to `false` after the new binary is confirmed.
     pub fn set_paused(env: Env, paused: bool) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
