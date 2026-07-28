@@ -46,17 +46,15 @@ pub enum ContractError {
     /// The supplied GitHub username is empty, longer than
     /// `utils::MAX_USERNAME_LEN`, or contains characters GitHub does not allow.
     InvalidUsername = 11,
-    /// The upgrade attestation has lapsed, or `attest_upgrade` was called with
-    /// an `expires_at` that is not in the future.
+    /// `attest_upgrade` was called with an `expires_at` not in the future, or a
+    /// live attestation lapsed before `upgrade` consumed it.
     AttestationExpired = 12,
-    /// A batch operation (e.g. `extend_registry_ttl`) was called with an
-    /// empty list or with more items than `BatchConfig::max_batch_size`.
-    InvalidBatchSize = 13,
-    /// `upgrade` was called with a hash that does not match the live
-    /// attestation. See `attest_upgrade`. Not part of the originally
-    /// requested code range but required for `src/lib.rs` (`upgrade`) to
-    /// compile — it referenced this variant already.
-    UnattestedWasm = 14,
+    /// `upgrade` was called with a WASM hash that does not match the live
+    /// attestation.
+    UnattestedWasm = 13,
+    /// A batch call (e.g. `extend_registry_ttl`) was given zero or more items
+    /// than `batch::BatchConfig::max_batch_size` allows.
+    InvalidBatchSize = 14,
 }
 
 impl ContractError {
@@ -82,8 +80,8 @@ impl ContractError {
             10 => Some(ContractError::InvalidRole),
             11 => Some(ContractError::InvalidUsername),
             12 => Some(ContractError::AttestationExpired),
-            13 => Some(ContractError::InvalidBatchSize),
-            14 => Some(ContractError::UnattestedWasm),
+            13 => Some(ContractError::UnattestedWasm),
+            14 => Some(ContractError::InvalidBatchSize),
             _ => None,
         }
     }
@@ -107,8 +105,8 @@ impl ContractError {
 // | 10   | InvalidRole          | set_role                           |
 // | 11   | InvalidUsername      | register                           |
 // | 12   | AttestationExpired   | attest_upgrade, upgrade            |
-// | 13   | InvalidBatchSize     | extend_registry_ttl                |
-// | 14   | UnattestedWasm       | upgrade                            |
+// | 13   | UnattestedWasm       | upgrade                            |
+// | 14   | InvalidBatchSize     | extend_registry_ttl                |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

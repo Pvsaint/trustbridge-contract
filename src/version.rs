@@ -27,6 +27,24 @@ pub struct Version {
 /// since a contract deployed at 1.0.0 will reject the invocation outright.
 pub const BATCH_VERIFY_MIN_VERSION: Version = Version::new(1, 1, 0);
 
+/// First contract version whose public read functions (`get_address`,
+/// `has_record`, `get_public_paginated`, `get_stats`, `get_verified_count`,
+/// `get_role`, `version`/`is_compatible`, …) are safe for a sibling contract
+/// to call cross-contract (Wave issue #149).
+///
+/// The read surface those functions expose has been stable since the
+/// contract's initial release, so this is 1.0.0 rather than a forward-looking
+/// gate like [`BATCH_VERIFY_MIN_VERSION`] — it exists so a consuming contract
+/// can assert compatibility the same way it does for `batch_verify`, instead
+/// of special-casing "assume reads always work."
+///
+/// Admin-gated exports (`get_all_registered`, `get_registered_page`,
+/// `get_registered_paginated`) are deliberately excluded: they call
+/// `admin.require_auth()`, and a cross-contract invocation cannot supply the
+/// registry admin's signature, so they are not part of this surface at any
+/// version. See `docs/ABI.md` § Cross-Contract Read Interface.
+pub const CROSS_CONTRACT_READ_MIN_VERSION: Version = Version::new(1, 0, 0);
+
 impl Version {
     /// Create a new version.
     pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
@@ -43,6 +61,12 @@ impl Version {
     /// `verify` calls without probing the contract and interpreting a failure.
     pub fn supports_batch_verify(&self) -> bool {
         self.is_compatible_with(BATCH_VERIFY_MIN_VERSION)
+    }
+
+    /// Whether this version's public read functions are safe to call
+    /// cross-contract. See [`CROSS_CONTRACT_READ_MIN_VERSION`].
+    pub fn supports_cross_contract_reads(&self) -> bool {
+        self.is_compatible_with(CROSS_CONTRACT_READ_MIN_VERSION)
     }
 
     /// Parse a version from a tuple (used for storage).

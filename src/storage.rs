@@ -31,9 +31,7 @@ pub const ROLE_KEY: Symbol = symbol_short!("role");
 
 /// Key prefix for chunked username index entries.
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
-/// Key for the count of chunks in the chunked index.
-pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chunkcnt");
-/// Key for the per-user last-action timestamp (cooldown tracking).
+pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
 /// Key for the WASM provenance record (Wave #24).
 pub const PROV_KEY: Symbol = symbol_short!("prov");
@@ -42,28 +40,11 @@ pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
-#[allow(dead_code)]
 pub const VERSION_KEY: Symbol = VER_KEY;
 
-/// Provenance record for the currently deployed WASM (Wave #24).
-pub const PROV_KEY: Symbol = symbol_short!("prov");
-/// Pending upgrade attestation, if the admin has declared one (Wave #24).
-pub const ATTEST_KEY: Symbol = symbol_short!("attest");
+// ── Pagination constants ─────────────────────────────────────────────────────
 
-/// Key for the version stored at `storage::get_version` / `set_version`.
-/// Aliased as VERSION_KEY for callers that use that name.
-pub const VERSION_KEY: Symbol = VER_KEY;
-
-// ── Pagination / chunking constants ─────────────────────────────────────────
-
-/// Entries per index chunk. Keeps a single chunk read well under the ledger
-/// entry size limit while still amortising reads across pages.
-pub const CHUNK_SIZE: u32 = 100;
-
-/// Page size used when a caller passes `limit = 0`.
 pub const DEFAULT_PAGE_LIMIT: u32 = 20;
-/// Upper bound on a single export page, to keep the response under the
-/// transaction result size limit.
 pub const MAX_PAGE_LIMIT: u32 = 100;
 
 // ── TTL constants (ledger-based, ~5s/ledger) ────────────────────────────────
@@ -216,7 +197,15 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
         .ok_or(ContractError::NotInitialized)
 }
 
-// ── Pause state ──────────────────────────────────────────────────────────────
+/// Returns the stored contract version, or `None` on an instance initialized
+/// before version tracking was added.
+pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
+    env.storage().instance().get(&VERSION_KEY)
+}
+
+pub fn set_version(env: &Env, version: (u32, u32, u32)) {
+    env.storage().instance().set(&VERSION_KEY, &version);
+}
 
 pub fn is_paused(env: &Env) -> bool {
     env.storage().instance().get(&PAUSED_KEY).unwrap_or(false)
@@ -226,6 +215,7 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&PAUSED_KEY, &paused);
 }
 
+/// Rejects the call while the contract is paused.
 pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     if is_paused(env) {
         Err(ContractError::Paused)
@@ -233,8 +223,6 @@ pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
         Ok(())
     }
 }
-
-// ── Contributor records ──────────────────────────────────────────────────────
 
 pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
     let key = (REG_KEY, github_username.clone());
@@ -314,36 +302,7 @@ pub fn set_index(env: &Env, index: &Vec<String>) {
     env.storage().instance().set(&INDEX_KEY, index);
 }
 
-/// Returns a slice of the username index: up to `limit` entries starting at
-/// `offset`. Out-of-range offsets yield an empty page rather than an error.
-///
-/// `limit == 0` is treated as "use the default page size"; anything above
-/// `MAX_PAGE_LIMIT` is clamped rather than rejected, so a caller asking for
-/// too much simply gets the largest page the contract is willing to return.
-pub fn get_index_page(env: &Env, offset: u32, limit: u32) -> Vec<String> {
-    let index = get_index(env);
-    let mut page = Vec::new(env);
-
-    let effective_limit = if limit == 0 {
-        DEFAULT_PAGE_LIMIT
-    } else {
-        limit.min(MAX_PAGE_LIMIT)
-    };
-
-    if offset >= index.len() {
-        return page;
-    }
-
-    let end = offset.saturating_add(effective_limit).min(index.len());
-    for i in offset..end {
-        if let Some(username) = index.get(i) {
-            page.push_back(username);
-        }
-    }
-    page
-}
-
-// ── Chunked username index (Issue #2) ────────────────────────────────────────
+// ── Chunked username index ───────────────────────────────────────────────────
 
 pub fn get_chunk_count(env: &Env) -> u32 {
     env.storage().instance().get(&CHUNK_CNT_KEY).unwrap_or(0)
