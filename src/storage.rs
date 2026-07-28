@@ -20,10 +20,6 @@ pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
 pub const PROV_KEY: Symbol = symbol_short!("prov");
 pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 
-/// Key for the version stored at `storage::get_version` / `set_version`.
-/// Aliased as VERSION_KEY for callers that use that name.
-pub const VERSION_KEY: Symbol = VER_KEY;
-
 // ── TTL constants (ledger-based, ~7 days at 5 s/ledger) ─────────────────────
 
 /// Ledgers per day at the ~5s close time, used to express the policy in days.
@@ -56,9 +52,6 @@ pub const MAX_PAGE_LIMIT: u32 = 100;
 pub const CHUNK_SIZE: u32 = 50;
 
 // ── Username validation ──────────────────────────────────────────────────────
-
-/// Stack buffer length for username case-normalization comparisons.
-pub const USERNAME_BUF_LEN: u32 = 64;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

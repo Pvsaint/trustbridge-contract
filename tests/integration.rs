@@ -279,8 +279,8 @@ fn test_integration_export_consistent_after_removal() {
             }
             v
         };
-        assert!(names.contains(&s(&env, "alice")));
-        assert!(names.contains(&s(&env, "carol")));
+        assert!(names.contains(s(&env, "alice")));
+        assert!(names.contains(s(&env, "carol")));
     });
 }
 
@@ -711,8 +711,8 @@ fn test_integration_public_paginated_after_peer_removal() {
             }
             v
         };
-        assert!(names.contains(&s(&env, "alice")));
-        assert!(names.contains(&s(&env, "carol")));
+        assert!(names.contains(s(&env, "alice")));
+        assert!(names.contains(s(&env, "carol")));
     });
 }
 
