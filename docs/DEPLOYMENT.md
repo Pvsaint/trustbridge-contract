@@ -2,7 +2,7 @@
 
 Step-by-step instructions for deploying **trustbridge-contract** to Stellar Testnet and Mainnet.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [CONTRACT_HEALTH](CONTRACT_HEALTH.md)
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [CONTRACT_HEALTH](CONTRACT_HEALTH.md) · [FUTURENET_ONBOARDING](FUTURENET_ONBOARDING.md)
 
 ---
 
