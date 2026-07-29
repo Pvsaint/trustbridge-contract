@@ -39,6 +39,34 @@ The admin address is **immutable** after `initialize`. Recommendations:
 - Never commit private keys or seed phrases
 - Rotate operational keys via deploying a new contract instance if admin is compromised (no on-chain admin transfer in v0.1)
 
+## Pause Semantics During Active Waves
+
+When pause mode is active, guarded entry points fail with
+`ContractError::Paused` (code `7`). This avoids partial-wave behavior where
+some state writes continue while others are frozen.
+
+Paused function matrix:
+
+| Function | Behavior while paused |
+|---------|------------------------|
+| `register` | Rejected with `Paused` |
+| `remove` | Rejected with `Paused` |
+| `verify` | Rejected with `Paused` |
+| `revoke_verification` | Rejected with `Paused` |
+| `upgrade` | Rejected with `Paused` |
+| `migrate` | Rejected with `Paused` |
+| `set_role` / `remove_role` | Rejected with `Paused` |
+| `get_public_paginated` | Rejected with `Paused` |
+
+Allowed while paused:
+
+| Function | Behavior while paused |
+|---------|------------------------|
+| `get_address`, `has_record`, `get_stats` | Allowed read-only lookups |
+| `get_all_registered`, `get_registered_page`, `get_registered_paginated` | Allowed for admin/export workflows |
+| `is_paused`, `is_contract_paused`, `version`, `is_compatible` | Allowed status and compatibility reads |
+| `pause`, `unpause`, `set_paused` | Allowed admin controls for freeze lifecycle |
+
 ---
 
 ## Registration Integrity
