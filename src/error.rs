@@ -1,22 +1,60 @@
 use soroban_sdk::contracterror;
 
+/// Errors returned by contract entry points.
+///
+/// Each variant maps to a stable `u32` code (see `code()` / `from_code()`).
+/// Off-chain consumers such as the dashboard and indexer use these codes to
+/// classify failed invocations without depending on the Rust enum layout.
+///
+/// | Code | Variant | Raised by |
+/// |------|---------|-----------|
+/// | 1 | `AlreadyInitialized` | `initialize` |
+/// | 2 | `NotInitialized` | any function called before `initialize` |
+/// | 3 | `NotAuthorized` | `remove`, `verify`, `revoke_verification`, role functions |
+/// | 4 | `NotRegistered` | `remove`, `verify`, `revoke_verification` |
+/// | 5 | `AlreadyVerified` | `verify` |
+/// | 6 | `NotVerified` | `revoke_verification` |
+/// | 7 | `Paused` | any state-mutating call while paused |
+/// | 8 | `CooldownActive` | `upgrade` |
+/// | 9 | `InvalidVersion` | `migrate` |
+/// | 10 | `InvalidRole` | `set_role` |
+/// | 11 | `InvalidUsername` | `register` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ContractError {
+    /// `initialize` was called more than once.
     AlreadyInitialized = 1,
+    /// A function was called before `initialize`.
     NotInitialized = 2,
+    /// The caller does not have the required role or does not own the resource.
     NotAuthorized = 3,
+    /// The referenced `github_username` is not registered.
     NotRegistered = 4,
+    /// `verify` was called on a username that is already verified.
     AlreadyVerified = 5,
+    /// `revoke_verification` was called on a username that is not verified.
     NotVerified = 6,
+    /// A state-mutating function was called while the contract is paused.
     Paused = 7,
+    /// `upgrade` was called before the cooldown period elapsed.
     CooldownActive = 8,
+    /// `migrate` was called with a version that is not strictly greater than the current one.
     InvalidVersion = 9,
+    /// `set_role` was called with an unrecognised role discriminant.
     InvalidRole = 10,
     /// The supplied GitHub username is empty, longer than
     /// `utils::MAX_USERNAME_LEN`, or contains characters GitHub does not allow.
     InvalidUsername = 11,
+    /// `attest_upgrade` was called with an `expires_at` not in the future, or a
+    /// live attestation lapsed before `upgrade` consumed it.
+    AttestationExpired = 12,
+    /// `upgrade` was called with a WASM hash that does not match the live
+    /// attestation.
+    UnattestedWasm = 13,
+    /// A batch call (e.g. `extend_registry_ttl`) was given zero or more items
+    /// than `batch::BatchConfig::max_batch_size` allows.
+    InvalidBatchSize = 14,
 }
 
 impl ContractError {
@@ -41,6 +79,9 @@ impl ContractError {
             9 => Some(ContractError::InvalidVersion),
             10 => Some(ContractError::InvalidRole),
             11 => Some(ContractError::InvalidUsername),
+            12 => Some(ContractError::AttestationExpired),
+            13 => Some(ContractError::UnattestedWasm),
+            14 => Some(ContractError::InvalidBatchSize),
             _ => None,
         }
     }
@@ -63,6 +104,9 @@ impl ContractError {
 // | 9    | InvalidVersion       | migrate                            |
 // | 10   | InvalidRole          | set_role                           |
 // | 11   | InvalidUsername      | register                           |
+// | 12   | AttestationExpired   | attest_upgrade, upgrade            |
+// | 13   | UnattestedWasm       | upgrade                            |
+// | 14   | InvalidBatchSize     | extend_registry_ttl                |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

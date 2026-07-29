@@ -2,7 +2,7 @@
 
 This document describes the design of **trustbridge-contract** — the on-chain GitHub username registry for TrustBridge on Stellar Soroban.
 
-Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md)
+Related docs: [README](../README.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [CONTRIBUTING](CONTRIBUTING.md) · [CONTRACT_HEALTH](CONTRACT_HEALTH.md)
 
 ---
 
@@ -23,6 +23,10 @@ Consumers:
 2. **GitHub Action** — resolves usernames to payout addresses at CI time
 3. **Dashboard** — displays registry state, verification status, and stats
 4. **Admin** — verifies identities off-chain and marks them on-chain
+
+Operational monitors should compose liveness/readiness from existing read
+methods (no dedicated on-chain `health` entrypoint). See
+[CONTRACT_HEALTH.md](CONTRACT_HEALTH.md).
 
 ---
 
@@ -47,6 +51,7 @@ Consumers:
 | `Symbol("count")` | `u32` | Total active registrations |
 | `Symbol("vcount")` | `u32` | Count of verified registrations |
 | `Symbol("idx")` | `Vec<String>` | Ordered list of registered usernames (for admin export) |
+| `Symbol("ver")` | `(u32, u32, u32)` | Contract schema version tuple |
 
 ### Persistent Storage (per-entry, TTL-extended)
 
@@ -69,6 +74,10 @@ pub struct ContributorRecord {
 - **`idx` index:** Soroban does not support iterating arbitrary storage keys. The username index enables `get_all_registered()` without scanning the entire ledger.
 - **`vcount` counter:** Maintained incrementally so `get_stats()` is O(1) rather than scanning all records.
 - **Re-registration:** Updating an existing username overwrites the record. If the Stellar address changes, `verified` resets to `false` unless the address is unchanged.
+- **Rent / Wave budgeting:** Dashboard UIs that estimate storage rent from N
+  users should consume the versioned estimator inputs in
+  [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md) (on-chain rent only;
+  indexer disk is separate).
 
 ---
 
@@ -186,9 +195,35 @@ lto = true
 
 ---
 
+## Cross-Contract Composability
+
+Wave issue #149. Future TrustBridge contracts (payout, attestation) need to
+answer "is this GitHub username registered, and verified?" without
+maintaining a second copy of the registry. Soroban supports this natively:
+any contract can call another contract's public functions directly via
+`env.invoke_contract`, so no separate "reader" interface needed to be built —
+the registry's existing read functions (`get_address`, `has_record`,
+`get_stats`, `get_role`, …) already satisfy it.
+
+The one design decision this forces is which functions are *appropriate* to
+expose that way. A cross-contract call runs in the caller's authorization
+context, so a sibling contract can never supply the registry admin's
+signature — anything gated on `admin.require_auth()` (`get_all_registered`,
+`get_registered_page`, `get_registered_paginated`) is unreachable
+cross-contract by construction, not by an added check. That boundary, plus
+the full list of what *is* safe to call, is documented in
+[ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface).
+
+Because the safe surface is entirely existing, already-deployed functions,
+adopting it requires no storage migration and no new contract version for
+existing v0.1 consumers — `Version::supports_cross_contract_reads()` pins the
+compatibility floor at 1.0.0 for callers that want to assert it explicitly.
+
+---
+
 ## Future Considerations
 
-- **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md).
+- **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md). Estimator TTL schedule: [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md).
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
 

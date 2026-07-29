@@ -27,6 +27,21 @@ struct Stats {
 }
 ```
 
+### ExportPage
+
+Returned by `get_registered_paginated` and `get_public_paginated`. Unlike
+`get_all_registered`, each entry is a full `ContributorRecord` — so `verified`
+is available directly, with no second call needed (Issue #96).
+
+```rust
+struct ExportPage {
+    records: Vec<(String, ContributorRecord)>,
+    next_cursor: Option<u32>,
+    total: u32,
+    has_more: bool,
+}
+```
+
 ### BatchSummary
 
 Returned by `batch_verify`. `success_rate` is an integer percentage.
@@ -65,11 +80,15 @@ enum Role {
 | 9 | `InvalidVersion` | Target version is not higher than current version |
 | 10 | `InvalidRole` | Invalid or unauthorized role assignment |
 | 11 | `InvalidUsername` | Username is empty, over `max_username_len`, or contains disallowed characters |
+| 12 | `AttestationExpired` | Upgrade attestation's `expires_at` has passed |
+| 13 | `UnattestedWasm` | `upgrade` hash does not match the live attestation |
+| 14 | `InvalidBatchSize` | Batch call supplied zero items or more than the configured max |
+| 15 | `ZeroAddress` | Supplied Stellar address is the well-known zero/burn address |
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
-variant and returns `None` for any unrecognized code. All ten codes round-trip
+variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
-tests in `src/lib.rs` (`test_from_code_round_trips_all_variants`).
+tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
 ---
 
@@ -84,6 +103,14 @@ One-time setup. Stores the admin address and zeroes counters.
 | **Auth** | None (protect at deployment time) |
 | **Mutates** | Yes |
 | **Errors** | `AlreadyInitialized` |
+
+**Admin immutability (Issue #97).** The admin address set here cannot be
+overwritten or silently replaced afterward: `initialize` is the only entry
+point that writes it, and a second call always fails with
+`AlreadyInitialized`, regardless of which admin address it names. No other
+function in this ABI mutates the admin. There is no on-chain admin-transfer
+API — rotating the admin means deploying a new contract instance. See
+[SECURITY.md § Admin Key Management](SECURITY.md#admin-key-management).
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
@@ -100,8 +127,20 @@ Register or update a GitHub username mapping.
 |---|---|
 | **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername`, `ZeroAddress` |
 | **Events** | `RegisteredEvent` |
+
+**Zero-address rejection:**
+
+`stellar_address` must not be the well-known zero/burn address
+(`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`, the strkey
+encoding of an all-zero ed25519 public key), or the call fails with
+`ZeroAddress` (code 15), checked before `require_auth`. On a live network
+`require_auth` would already reject this address — no private key exists for
+it — but `mock_all_auths` in tests and local sandboxes bypasses that check, so
+the explicit guard is what actually stops a mistaken zero-address registration
+in those environments, and gives dashboard/indexer consumers a typed error
+instead of an opaque auth failure. Use `is_address_zero` to pre-check.
 
 **Username validation:**
 
@@ -111,7 +150,8 @@ Register or update a GitHub username mapping.
 | Rule | Accepted | Rejected |
 |---|---|---|
 | Length 1–39 characters | `a`, `octocat` | `""`, 40+ characters |
-| ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space`, `café` |
+| ASCII only — no Unicode | `user123`, `bob-smith` | `café`, `аlice` (Cyrillic a), `user😀`, `中user` |
+| ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space` |
 | First and last character alphanumeric | `alice`, `7` | `-invalid`, `invalid-`, `_leading`, `trailing_` |
 | No consecutive hyphens | `foo-bar-baz` | `foo--bar` |
 
@@ -143,25 +183,44 @@ Behavior:
 - If a verified username is updated to a new Stellar address, verification is
   cleared until the admin verifies the updated address. The Wave #49 regression
   test covers re-verification against the new address.
+- Index-length invariant: every successful `register` increments `COUNT_KEY`
+  **and** appends to `INDEX_KEY` atomically. A re-registration of an existing
+  username does neither. See [SECURITY.md](SECURITY.md#index-length-invariant).
 
-**Username rules** (enforced on-chain, checked before auth):
-
-| Rule | Value |
-|------|-------|
-| Length | 1 to 39 characters (read `max_username_len` rather than hardcoding 39) |
-| Allowed characters | `a-z`, `A-Z`, `0-9`, `-`, `_` |
-| First and last character | Must be alphanumeric |
-
-Anything else fails with `InvalidUsername` before any signature is verified and
-before any storage write, so a rejected call leaves counters and the export
-index untouched. Underscores are accepted even though GitHub itself disallows
-them, so registrations made before validation existed stay readable and
-removable.
+**Copy-pasteable examples**
 
 ```bash
-stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
-  -- register --github-username octocat --stellar-address G...
+# New registration (registrant signs with the Stellar address being registered)
+stellar contract invoke --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  --send=yes \
+  -- register \
+  --github-username octocat \
+  --stellar-address G...
 ```
+
+```bash
+# Re-point an existing username to a new address
+# BOTH the old and new addresses must sign this call
+stellar contract invoke --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  --send=yes \
+  -- register \
+  --github-username octocat \
+  --stellar-address G...
+```
+
+**Common failure modes**
+
+| Failure | Cause | Fix |
+|---|---|---|
+| `NotInitialized` (code 2) | Contract not yet initialized | Run `make invoke-init` first |
+| `Paused` (code 7) | Contract is paused | Wait for unpause or contact admin |
+| `InvalidUsername` (code 11) | Username empty, >39 chars, or contains disallowed characters | Use 1–39 ASCII alphanumerics, hyphens, underscores |
+| `NotAuthorized` (code 3) | `stellar_address` did not sign, or old address did not sign on transfer | Ensure the correct source account is used |
+
 
 ---
 
@@ -182,6 +241,19 @@ require a client release.
 
 Reports whether a username would pass the `register` guard, so a dashboard can
 validate input before asking the user to sign.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+---
+
+### `is_address_zero(address: Address) -> bool`
+
+Reports whether `address` is the well-known zero/burn address that `register`
+rejects, so a dashboard or indexer consumer can validate a Stellar address
+before asking a user to sign — mirroring `is_username_valid`.
 
 | | |
 |---|---|
@@ -229,9 +301,9 @@ Remove a registration.
 
 | | |
 |---|---|
-| **Auth** | `caller` must sign; must be admin or registrant |
+| **Auth** | `caller` must sign; must be admin or registrant — see **Auth model** below |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotRegistered`, `NotAuthorized` |
+| **Errors** | `NotInitialized`, `Paused`, `NotRegistered`, `NotAuthorized` |
 | **Events** | `RemovedEvent` |
 
 ```bash
@@ -244,10 +316,68 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- remove --caller G... --github-username octocat
 ```
 
+**Auth model** (Issue #74 / Wave #75):
+
+The authorization check is isolated in `TrustBridgeContract::require_remove_auth`
+so it can be read, tested, and changed independently of the mutation logic:
+
+```
+caller == admin                    → allowed
+caller == record.stellar_address   → allowed (registrant self-removal)
+anything else                      → NotAuthorized
+```
+
+`caller.require_auth()` runs first — the host verifies the signature before the
+policy check. `NotRegistered` is returned before auth when the username does not
+exist in storage, so a caller cannot probe username existence by observing whether
+they get `NotRegistered` or `NotAuthorized`.
+
+**Error precedence:**
+
+| Condition | Error |
+|-----------|-------|
+| Contract not initialized | `NotInitialized` |
+| Contract paused | `Paused` |
+| Username not registered | `NotRegistered` |
+| Caller is not admin or registrant | `NotAuthorized` |
+
+**Test coverage** (`src/lib.rs`, Issue #74 / Wave #75):
+
+| Test | Path |
+|------|------|
+| `test_registrant_can_remove_own_record` | Success — registrant |
+| `test_admin_can_remove_any_record` | Success — admin |
+| `test_admin_can_remove_record_registered_by_another_user` | Success — admin removes different user's record |
+| `test_third_party_cannot_remove` | Failure — `NotAuthorized`, record and count unchanged |
+| `test_unknown_address_cannot_remove` | Failure — `NotAuthorized` for fresh address with no role |
+| `test_remove_unregistered_username_fails` | Failure — `NotRegistered` |
+| `test_remove_already_removed_username_fails` | Failure — `NotRegistered` on double removal |
+| `test_remove_blocked_while_paused` | Failure — `Paused` |
+| `test_remove_unverified_record_does_not_decrement_verified_count` | Invariant — verified count unchanged |
+| `test_remove_verified_record_decrements_verified_count` | Invariant — verified count decremented |
+| `test_readding_removed_user_increments_count` | Invariant — re-add starts fresh and unverified |
+
 Stats invariant: partial removal decrements `total` only for the removed record
 and decrements `verified` only when that removed record was verified. Removing
 an unverified record while another verified record remains must leave
-`verified` unchanged; this is covered by the Wave #46 regression test.
+`verified` unchanged; this is covered by the Wave #46 regression test and
+`test_remove_unverified_record_does_not_decrement_verified_count`.
+
+Index-length invariant: after every `remove`, `get_stats().total` must equal
+the length of the flat username index. Both are updated atomically in the same
+transaction. See the **Index-Length Invariant** section in
+[SECURITY.md](SECURITY.md#index-length-invariant) and the test suite in
+`tests/integration.rs` (Issue #59 / Wave #60).
+
+Empty-registry invariant (Issue #92): removing the **last** registered
+contributor returns the registry to a clean empty state — `get_stats()`
+reports `{total: 0, verified: 0}`, the username index is empty
+(`get_all_registered`, `get_registered_page`, and the paginated export paths
+all return zero records with `has_more: false`), and every lookup
+(`get_address`, `has_record`) reports absence. No stale index entry or
+non-zero counter survives. A subsequent registration on the now-empty
+registry proceeds exactly as it would on a never-used one. Covered by
+`test_remove_last_user_returns_registry_to_empty_state` in `src/lib.rs`.
 
 ---
 
@@ -266,15 +396,160 @@ stellar contract invoke --id $ID --source admin --network testnet \
   -- get_all_registered
 ```
 
+**Scale warning:** past ~100 contributors prefer paginated export
+([Issue #1](https://github.com/Stellar-TrustBridge/trustbridge-contract/issues/1),
+Issue #143). See [Paginated export](#paginated-export-issue-1--143) below and
+[DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).
+
 ---
 
-### `verify(github_username: String) -> Result<(), ContractError>`
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
 
-Mark a contributor as verified after off-chain GitHub identity confirmation.
+Bulk export must not exceed Soroban resource limits on large registries.
+`get_all_registered` remains available for small dumps; production sync jobs
+should page.
+
+### Limit constants (`src/storage.rs`)
+
+| Constant | Value | Notes |
+|----------|------:|-------|
+| `DEFAULT_PAGE_LIMIT` | `20` | Applied when `limit == 0` |
+| `MAX_PAGE_LIMIT` | `100` | Enforced by **clamping** (`limit.min(MAX_PAGE_LIMIT)`); over-limit does not error |
+
+Justification: a single invoke that materializes more than ~100 registry
+reads trips the ledger-entry footprint ceiling (see [Cost and
+benchmarks](#cost-and-benchmarks)). Capping the page keeps each call inside
+that budget while still allowing full export via a cursor loop.
+
+### `ExportPage`
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `records` | `Vec<(String, ContributorRecord)>` | Current page |
+| `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
+| `total` | `u32` | Live registration count |
+| `has_more` | `bool` | `true` when another page exists |
+
+### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 
 | | |
 |---|---|
-| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Auth** | Admin (`admin.require_auth()`) — unchanged by Issue #143 |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor 0 --limit 100
+```
+
+### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Same page shape and limit clamping; no admin auth; requires not paused.
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_public_paginated --cursor 0 --limit 100
+```
+
+### Consumer loop
+
+```text
+cursor ← 0
+repeat:
+  page ← get_registered_paginated(cursor, limit)   # or get_public_paginated
+  process(page.records)
+  if page.has_more is false OR page.next_cursor is None:
+    stop
+  cursor ← page.next_cursor
+```
+
+Exhaustion is when `has_more == false` / `next_cursor == None` (including an
+empty page when `cursor >= total`).
+
+Boundary tests: `test_paginated_export_at_max_page_limit`,
+`test_paginated_export_over_max_page_limit_clamps` in `src/lib.rs`.
+
+---
+
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
+
+*Note: Triggers `AlreadyInitialized` if executed after the initial verification configuration is stored.*
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- config_verification --caller G... --attestation github_att --expiry 3600 --quorum 2
+```
+
+---
+
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
+
+Admin-gated page of `(github_username, stellar_address)` pairs, for large
+registries where `get_all_registered` would exceed the per-invocation
+footprint limit. Same shape as `get_all_registered` — no `verified` flag; use
+`get_registered_paginated` for that.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+
+---
+
+### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Admin-gated paginated export. Each entry is a full `ContributorRecord`, so the
+`verified` bit travels with every row — no second call or cross-reference
+against `get_address` is needed to know verification status (Issue #96).
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+
+`limit = 0` defaults to `DEFAULT_PAGE_LIMIT` (20); any value above
+`MAX_PAGE_LIMIT` (100) is clamped down to it. `next_cursor` is `Some` while
+`has_more` is true; pass it back as `cursor` to continue.
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor 0 --limit 50
+```
+
+---
+
+### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+Same `ExportPage` shape as `get_registered_paginated` — including the
+`verified` flag per record — but callable by anyone. This is the
+unauthenticated read path for dashboards and indexers that need
+username + address + verified without an admin key (Issue #96).
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `Paused` |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_public_paginated --cursor 0 --limit 50
+```
+
+---
+
+### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
+
+Mark a contributor as verified after off-chain GitHub identity confirmation.
+
+Admin authorization is authoritative. The `caller` argument must be the admin or an address granted `Role::Verifier` via `set_role`. A registrant **cannot** self-verify.
+
+| | |
+|---|---|
+| **Auth** | Admin **or** any address assigned `Role::Verifier` |
 | **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
 | **Errors** | `NotInitialized`, `NotRegistered`, `AlreadyVerified`, `NotAuthorized` |
@@ -283,15 +558,14 @@ Mark a contributor as verified after off-chain GitHub identity confirmation.
 The `caller` argument is required so the contract can validate which identity
 signed the transaction. Both the admin and any address granted `Role::Verifier`
 via `set_role` may call this function. An address without either role returns
-`NotAuthorized`.
+`NotAuthorized`. Calling `verify` on a `github_username` that has never been
+registered returns `NotRegistered` rather than creating a record (Issue #57);
+`revoke_verification` guards the same way (see tests in `src/lib.rs` and
+`tests/integration.rs`).
 
 ```bash
-# Admin calling verify
+# Admin calling verify (authoritative example)
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- verify --caller G... --github-username octocat
-
-# Verifier-role holder calling verify
-stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
   -- verify --caller G... --github-username octocat
 ```
 
@@ -339,31 +613,43 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 
 ---
 
-### `revoke_verification(github_username: String) -> Result<(), ContractError>`
+### `revoke_verification(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Revoke verification for a registered contributor.
 
+Admin authorization is authoritative. The `caller` argument must be the admin or an address granted `Role::Verifier` via `set_role`. A registrant **cannot** revoke another's verification.
+
 | | |
 |---|---|
-| **Auth** | Admin **or** any address assigned `Role::Verifier` (Issue #12) |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` |
 | **Caller arg** | `caller: Address` — must be the admin or a `Verifier`-role holder |
 | **Mutates** | Yes |
 | **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified`, `NotAuthorized` |
 | **Events** | `VerificationRevokedEvent` |
 
-Like `verify`, the `caller` argument enables on-chain role enforcement. Only
-the contract admin or a `Verifier`-role holder may revoke verification. An
-`Upgrader`-role holder or an address with no role returns `NotAuthorized`.
+Like `verify`, the `caller` argument enables on-chain role enforcement. Only the contract admin or a `Verifier`-role holder may revoke verification. An `Upgrader`-role holder or an address with no role returns `NotAuthorized`.
+
+**Mainnet incident response:** prefer this method over `remove` when the goal
+is to stop trust quickly. Operator runbook (detect → revoke → notify → audit
+export): [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md#mainnet-incident-emergency-verification-revoke).
+Threat-model notes: [SECURITY.md](SECURITY.md#mainnet-verification-revoke-incidents).
 
 ```bash
-# Admin revoking verification
+# Admin revoking verification (authoritative example)
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- revoke_verification --caller G... --github-username octocat
-
-# Verifier-role holder revoking verification
-stellar contract invoke --id $ID --source verifier --network testnet --send=yes \
-  -- revoke_verification --caller G... --github-username octocat
 ```
+
+**Verify → revoke → verify cycle (Issue #95).** `verify` and
+`revoke_verification` can be applied to the same username repeatedly without
+corrupting counters or storage: revoking decrements `verified`, and a
+subsequent `verify` succeeds and publishes a fresh `VerifiedEvent`. Only the
+`verified` flag and the `verified` counter change across the cycle — the
+record's `stellar_address` and `registered_at` are untouched. A `verify` call
+with no intervening `revoke_verification` still fails `AlreadyVerified`, even
+after the record has already been through one full cycle. Covered by
+`test_issue_95_verify_revoke_verify_cycle` and
+`test_issue_95_double_verify_without_revoke_fails_mid_cycle` in `src/lib.rs`.
 
 ---
 
@@ -375,6 +661,15 @@ Returns the number of verified registrations.
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+**Parity invariant (Issue #90):** `get_verified_count()` always equals
+`get_stats().verified`, and both always equal the number of stored records
+with `verified == true`. This holds after every path that touches
+verification state — `register` (including an address-change re-register),
+`verify`, `revoke_verification`, and `remove` — including on an empty
+registry and across repeated verify/revoke cycles. See
+[REGISTRY_INVARIANTS.md#verification](REGISTRY_INVARIANTS.md#verification)
+and `test_verified_count_parity_across_all_mutation_paths` in `src/lib.rs`.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet \
@@ -590,12 +885,35 @@ topics: ["verified_event", github_username]
 data:   { stellar_address, timestamp }
 ```
 
+`VerifiedEvent` is the primary signal an indexer uses to learn that a
+contributor's GitHub identity has been confirmed. Its payload is a
+compatibility surface: any rename of the topic symbol, reorder of topics,
+or change to the data fields silently breaks every downstream subscriber.
+
+The following tests in `src/lib.rs` pin the full payload (Issue #64 / Wave #65):
+
+| Test | What it checks |
+|------|----------------|
+| `test_verified_event_payload_is_complete` | Full event list matches: topic symbol `"verified_event"`, `github_username` topic, `stellar_address` and `timestamp` in data |
+| `test_verified_event_not_published_on_already_verified` | **Failure path**: `AlreadyVerified` must not publish an event |
+| `test_verified_event_not_published_on_unregistered_username` | **Failure path**: `NotRegistered` must not publish an event |
+| `test_verified_event_carries_current_stellar_address` | Event carries the address current at verify time, not a stale pre-update address |
+
 ### VerificationRevokedEvent
 
 ```
 topics: ["verification_revoked_event", github_username]
 data:   { stellar_address, timestamp }
 ```
+
+Mirrors `VerifiedEvent`. Indexers subscribe to both and reconcile verified
+state from the event stream, so `VerificationRevokedEvent` is the same
+compatibility surface.
+
+| Test | What it checks |
+|------|----------------|
+| `test_verification_revoked_event_payload_is_complete` | Full event list matches: topic symbol, `github_username` topic, `stellar_address` and `timestamp` in data |
+| `test_verification_revoked_event_not_published_on_not_verified` | **Failure path**: `NotVerified` must not publish an event |
 
 ### UpgradedEvent
 
@@ -611,12 +929,28 @@ topics: ["paused_event" / "unpaused_event", admin]
 data:   { timestamp }
 ```
 
-### RoleGrantedEvent / RoleRevokedEvent
+### RoleGrantedEvent
 
 ```
-topics: ["role_granted_event" / "role_revoked_event", address]
+topics: ["role_granted_event", address]
 data:   { role, admin, timestamp }
 ```
+
+`RoleGrantedEvent` is emitted when an admin assigns a role to an address.
+Subscribers can filter on the `address` topic to track role changes for a
+specific identity.
+
+### RoleRevokedEvent
+
+```
+topics: ["role_revoked_event", address]
+data:   { admin, timestamp }
+```
+
+`RoleRevokedEvent` is emitted when an admin revokes a role from an address.
+Like `RoleGrantedEvent`, the `address` topic lets indexers filter server-side.
+Note that `role` is **not** present in the data payload — a consumer that needs
+the previous role must track it from the corresponding `RoleGrantedEvent`.
 
 ---
 
@@ -720,6 +1054,72 @@ unable to detect the drift, so the bump is a review blocker.
 
 ---
 
+## Cross-Contract Read Interface
+
+Sibling TrustBridge contracts (payout, attestation, and future Waves) can
+query registry state directly via Soroban's cross-contract call
+(`env.invoke_contract`), instead of duplicating registration/verification
+storage of their own. This section is the safe subset of the ABI for that use
+case — no new functions were added for it, only a fence around which existing
+ones are appropriate to call from another contract's execution context.
+
+### Safe to call cross-contract
+
+All of the following are read-only (no `.set`/`.remove` on storage) and
+require **no authorization** beyond the standard `require_not_paused` guard
+where noted, so a calling contract needs no signature from the registry's
+admin or any registrant to invoke them:
+
+| Function | Returns | Notes |
+|---|---|---|
+| `get_address(github_username)` | `Option<ContributorRecord>` | Core identity lookup |
+| `has_record(github_username)` | `bool` | Cheap existence check, avoids decoding the full record |
+| `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; fails with `Paused` while the registry is paused |
+| `get_stats()` | `Stats` | `{ total, verified }` |
+| `get_verified_count()` | `u32` | |
+| `get_role(address)` | `Option<Role>` | RBAC lookup, e.g. to gate a payout on `Role::Verifier` |
+| `is_paused()` / `is_contract_paused()` | `bool` | Check before a call that would otherwise fail on `Paused` |
+| `is_registration_in_cooldown(github_username)` | `bool` | |
+| `version()` | `(u32, u32, u32)` | |
+| `is_compatible(major, minor, patch)` | `bool` | Guard the same way a TypeScript client would (see version handshake above) |
+| `max_username_len()`, `is_username_valid(github_username)`, `usernames_match(a, b)` | — | Pure validation helpers, no storage access at all |
+
+`Version::supports_cross_contract_reads()` (`src/version.rs`) gates on this
+surface the same way `supports_batch_verify()` gates on the batched
+verification entry point, for a caller that wants to assert compatibility
+before invoking.
+
+### Not part of this surface: admin exports
+
+`get_all_registered`, `get_registered_page`, and `get_registered_paginated`
+call `admin.require_auth()` internally. A cross-contract invocation executes
+in the *calling* contract's authorization context — it cannot supply the
+registry admin's signature — so these calls will fail auth when invoked from
+another contract, regardless of caller identity. Sibling contracts needing a
+bulk export must go through the admin's own off-chain tooling, not a
+cross-contract call. This is deliberate: the registry has no notion of a
+"trusted contract" allowlist, so widening the export surface would mean any
+deployed contract could exfiltrate the full registry, not just the intended
+consumer.
+
+### Example: a hypothetical payout contract reading verification status
+
+```rust
+// From within another contract's implementation:
+let registry_id: Address = /* stored sibling contract ID */;
+let verified: Option<ContributorRecord> = env.invoke_contract(
+    &registry_id,
+    &Symbol::new(&env, "get_address"),
+    (github_username,).into_val(&env),
+);
+```
+
+No storage migration is required to adopt this: every function above already
+exists in the deployed 1.0.0 ABI, so a v0.1 consumer contract can start
+reading today without waiting on a TrustBridge registry upgrade.
+
+---
+
 ## Cost and Benchmarks
 
 Every state-changing call consumes ledger CPU instructions and memory. The
@@ -728,8 +1128,9 @@ benchmark suite lives with the unit tests in `src/lib.rs` under the
 `env.cost_estimate().budget()`.
 
 ```bash
-make bench            # print CPU/memory cost for every benchmarked operation
-make bench-export     # export-only run, results written to bench-results.txt
+make bench              # print CPU/memory cost for every benchmarked operation
+make bench-export       # export-only run, results written to bench-results.txt
+make bench-max-username # register at the max-length username, written to bench-max-username-register.txt
 ```
 
 Output is CSV so it can be diffed between branches:
@@ -750,6 +1151,7 @@ get_all_registered,100,...,...
 | `test_bench_username_case_normalization` | `usernames_match` at 10, 50, 100, 200 comparisons (`make bench-username`) |
 | `test_bench_core_operation_cpu_cost` | `register`, `get_address`, `get_stats` |
 | `test_bench_failure_path_costs_less_than_success` | Rejected `verify` versus accepted `verify` |
+| `test_bench_max_length_username_register` | `register` at a 1-character username versus the maximum accepted length (`MAX_USERNAME_LEN`, currently 39 — read `max_username_len()` rather than hardcoding it) (`make bench-max-username`, Issue #91) |
 
 ### Regression guards
 
@@ -767,6 +1169,27 @@ asserts on shape rather than fixed numbers:
   here.
 - A rejected call costs **strictly less** than the equivalent accepted call, so
   a missing-username lookup cannot become a cheap way to burn ledger budget.
+- The max-length username register costs **at least as much** as a
+  1-character register, and no more than **5x** that baseline. `register`'s
+  extra work for a longer username is a fixed-size copy into the 39-byte
+  validation buffer, not a nested or per-character scan, so a wide gap over
+  the baseline signals a complexity regression rather than expected growth.
+  Since `MAX_USERNAME_LEN` (39) is pinned by an assertion in
+  `test_bench_max_length_username_register`, an incompatible change to the
+  username length policy fails the benchmark outright instead of silently
+  benchmarking a username that no longer represents the worst case.
+
+### Max-length username register — expected range (Issue #91)
+
+`make bench-max-username` prints one CSV line for a 1-character register and
+one for a 39-character (`MAX_USERNAME_LEN`) register. As with the other
+benchmarks, absolute instruction counts drift between `soroban-sdk` releases —
+what matters is the **ratio** between the two lines, which the test enforces
+must stay within 5x. Re-run after any change to `register`, `is_valid_github_username`,
+or the storage/index write path, and compare the new ratio against the
+previous CSV output committed alongside the change (or against
+`bench-max-username-register.txt` from the prior run) to catch a regression
+before it reaches testnet.
 
 ### Caveats
 
@@ -785,6 +1208,58 @@ asserts on shape rather than fixed numbers:
 - `get_all_registered` is admin-only and scans the full index. At large
   contributor counts, prefer event indexing (see
   [EVENT_INDEXING.md](EVENT_INDEXING.md)) over repeated full exports.
+
+### Simulate-register gas reporting
+
+In addition to the in-process benchmark suite, operators can simulate real network
+resource consumption using `stellar contract invoke` **without** submitting a transaction
+or spending funds.  This is the recommended way to set Wave invoke budgets.
+
+```bash
+make simulate-register CONTRACT_ID=$CONTRACT_ID STELLAR_ADDR=$STELLAR_ADDR
+# or directly:
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  -- register \
+  --github-username octocat \
+  --stellar-address $STELLAR_ADDR
+```
+
+Omitting `--send=yes` triggers simulation mode.  The CLI prints resource fields
+including `cpu_instructions`, `mem_bytes`, and `min_resource_fee` (in stroops).
+
+Compare baseline (short username) vs. max-length (39 chars) to see the
+username-length delta (Issue #111 — `#77` cross-reference):
+
+```bash
+make simulate-register-compare CONTRACT_ID=$CONTRACT_ID STELLAR_ADDR=$STELLAR_ADDR
+# Writes both results to simulate-register-results.txt for diffing
+```
+
+**Limitations:** simulation fees are approximations — actual fees may differ under
+ledger load, after protocol upgrades, or if the simulated footprint differs from the
+live footprint.  See [DEPLOYMENT.md#simulate-register-gas-reporting](DEPLOYMENT.md#simulate-register-gas-reporting)
+for a full field-by-field interpretation guide and caveats.
+
+---
+
+## GDPR Privacy & Right to Erasure Hook
+
+For GDPR compliance, the contract maps only technical identifiers: a GitHub username string, a Stellar public address, a registration timestamp, and a verification status boolean. 
+
+### Data Inventory
+The contract stores no personal identifiable information (PII) like names, email addresses, or phone numbers. All data relating to a user is contained in the `ContributorRecord` struct:
+- `stellar_address: Address`
+- `registered_at: u64`
+- `verified: bool`
+
+### Requesting Export
+A user can export their on-chain registry data by invoking `get_address` (publicly available). Admins can export all registrations via `get_all_registered` or page-by-page via `get_registered_paginated`.
+
+### Erasing Data
+To fulfill a GDPR "Right to Erasure" request, a user or admin should call the `remove` function. Calling `remove` deletes the user's `ContributorRecord` entry from persistent storage and cleans up the index reference, deleting all trace of the mapping on the active ledger state.
 
 ---
 

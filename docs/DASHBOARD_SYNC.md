@@ -2,6 +2,30 @@
 
 The TrustBridge dashboard and indexer consumers combine Soroban contract state with Horizon API checks to ensure secure, efficient payout readiness and contributor index synchronization.
 
+## ABI Event Reference
+
+All contract events are documented with their topic and data field layouts in
+[docs/ABI.md#events](ABI.md#events). Indexers should use that section as the
+source of truth for topic symbols, field names, and types — mismatches between
+docs and on-chain `#[contractevent]` definitions are tracked as documentation
+bugs.
+
+Key events to watch:
+
+| Event | Topic symbol | Key data fields |
+|---|---|---|
+| `RegisteredEvent` | `registered_event` | `stellar_address`, `timestamp` |
+| `VerifiedEvent` | `verified_event` | `stellar_address`, `timestamp` |
+| `VerificationRevokedEvent` | `verification_revoked_event` | `stellar_address`, `timestamp` |
+| `RemovedEvent` | `removed_event` | `stellar_address`, `timestamp` |
+| `UpgradedEvent` | `upgraded_event` | `version`, `timestamp` |
+| `PausedEvent` / `UnpausedEvent` | `paused_event` / `unpaused_event` | `timestamp` |
+| `RoleGrantedEvent` / `RoleRevokedEvent` | `role_granted_event` / `role_revoked_event` | `role`, `admin`, `timestamp` / `admin`, `timestamp` |
+
+> **Note:** `RoleRevokedEvent` does **not** include the `role` field in its data
+> payload. If your indexer needs to know which role was revoked, correlate the
+> revocation with the most recent `RoleGrantedEvent` for that address.
+
 ## Features & Integration Overview
 
 1. **Chunked Username Index (Issue #2)**: Contributor usernames are stored in chunked persistent vectors (100 items per chunk) to avoid storage entry size limits at scale.
@@ -27,7 +51,7 @@ Tests for this behavior live alongside the contract in `src/lib.rs`
 (`test_has_record_reflects_registration_state`) and `src/storage.rs`
 (`test_has_record_true_after_set_record`).
 
-## Paginated registry reads (Wave #41)
+## Paginated registry reads (Wave #41 / Issue #143)
 
 `get_all_registered` returns the entire index in one call, which doesn't
 scale as the registry grows. Use `get_registered_page(offset, limit)`
@@ -36,29 +60,219 @@ in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
-## Migration-window dual read
+---
 
-When a migration is in progress, resolve a username in this order:
+## Development Webhook Payload (Proposed)
 
-1. Query the local contract first.
-2. If the local lookup misses and the migration window is still open, call
-  the external read stub.
-3. If the stub returns an address, treat it as a candidate only until the
-  local contract imports the same username.
-4. Once the username exists locally, stop consulting the stub for that
-  record.
+**STATUS: NOT IMPLEMENTED — Development proposal only**
 
-The stub API shape is:
+This section documents a proposed JSON payload format for development webhooks that could translate contract events into HTTP callbacks for dashboard prototypes. This is **not production infrastructure** and is provided solely for future development planning.
 
-```rust
-RegistryLookup {
-   github_username: String,
-   stellar_address: Option<String>,
-   source_registry_id: String,
+### Purpose
+
+Enable local development and testing of dashboard integrations by providing a standardized webhook payload format for each registry event type. Future implementations may change these formats based on actual requirements.
+
+### Event Payload Formats
+
+All webhook payloads follow a common structure with event-specific fields:
+
+#### Base Payload Structure
+
+```json
+{
+  "event": "<event_name>",
+  "ledger": 123456,
+  "timestamp": "2026-07-28T12:34:56Z",
+  "transaction_id": "abc123...",
+  "version": 1
 }
 ```
 
-For test coverage, the repository includes a deterministic fixture stub with
-known usernames such as `legacy-alice` and `legacy-bob`. That lets dashboard
-sync tests cover the fallback path without depending on a live external
-registry or extra RPC wiring.
+#### RegisteredEvent
+
+Emitted when a contributor registers their GitHub username with a Stellar address.
+
+```json
+{
+  "event": "registered",
+  "ledger": 123456,
+  "timestamp": "2026-07-28T12:34:56Z",
+  "transaction_id": "abc123...",
+  "github_username": "octocat",
+  "stellar_address": "GBXXXX...",
+  "version": 1
+}
+```
+
+#### RemovedEvent
+
+Emitted when a registration is deleted (by contributor or admin).
+
+```json
+{
+  "event": "removed",
+  "ledger": 123457,
+  "timestamp": "2026-07-28T13:45:12Z",
+  "transaction_id": "def456...",
+  "github_username": "octocat",
+  "stellar_address": "GBXXXX...",
+  "version": 1
+}
+```
+
+#### VerifiedEvent
+
+Emitted when an admin marks a contributor as verified after off-chain identity confirmation.
+
+```json
+{
+  "event": "verified",
+  "ledger": 123458,
+  "timestamp": "2026-07-28T14:20:33Z",
+  "transaction_id": "ghi789...",
+  "github_username": "octocat",
+  "stellar_address": "GBXXXX...",
+  "version": 1
+}
+```
+
+#### VerificationRevokedEvent
+
+Emitted when an admin revokes a contributor's verification status.
+
+```json
+{
+  "event": "verification_revoked",
+  "ledger": 123459,
+  "timestamp": "2026-07-28T15:10:22Z",
+  "transaction_id": "jkl012...",
+  "github_username": "octocat",
+  "stellar_address": "GBXXXX...",
+  "version": 1
+}
+```
+
+#### UpgradedEvent
+
+Emitted when the contract WASM is upgraded.
+
+```json
+{
+  "event": "upgraded",
+  "ledger": 123460,
+  "timestamp": "2026-07-28T16:05:44Z",
+  "transaction_id": "mno345...",
+  "new_wasm_hash": "abc123def456...",
+  "version_major": 1,
+  "version_minor": 2,
+  "version_patch": 0,
+  "version": 1
+}
+```
+
+#### PausedEvent
+
+Emitted when the contract is paused by an admin (emergency stop).
+
+```json
+{
+  "event": "paused",
+  "ledger": 123461,
+  "timestamp": "2026-07-28T17:30:11Z",
+  "transaction_id": "pqr678...",
+  "admin": "GAXXXX...",
+  "version": 1
+}
+```
+
+#### UnpausedEvent
+
+Emitted when the contract is unpaused by an admin.
+
+```json
+{
+  "event": "unpaused",
+  "ledger": 123462,
+  "timestamp": "2026-07-28T18:15:55Z",
+  "transaction_id": "stu901...",
+  "admin": "GAXXXX...",
+  "version": 1
+}
+```
+
+#### RoleGrantedEvent
+
+Emitted when an admin grants a role to an address.
+
+```json
+{
+  "event": "role_granted",
+  "ledger": 123463,
+  "timestamp": "2026-07-28T19:00:00Z",
+  "transaction_id": "vwx234...",
+  "address": "GCXXXX...",
+  "role": 3,
+  "admin": "GAXXXX...",
+  "version": 1
+}
+```
+
+Role values:
+- `1` = Admin
+- `2` = Upgrader
+- `3` = Verifier
+
+#### RoleRevokedEvent
+
+Emitted when an admin revokes a role from an address.
+
+```json
+{
+  "event": "role_revoked",
+  "ledger": 123464,
+  "timestamp": "2026-07-28T20:45:30Z",
+  "transaction_id": "yz0567...",
+  "address": "GCXXXX...",
+  "admin": "GAXXXX...",
+  "version": 1
+}
+```
+
+### Security Considerations
+
+**IMPORTANT: Development webhook stubs must follow these security practices:**
+
+- **Never commit webhook URLs** — Always use environment variables (e.g., `WEBHOOK_URL`)
+- **Never commit tokens or secrets** — Use environment variables (e.g., `WEBHOOK_SECRET`)
+- **Implement webhook signature verification** — Recipients should validate payloads using HMAC or similar
+- **Use HTTPS only** — Never send webhooks over unencrypted HTTP in any environment
+- **Idempotency tokens** — Include transaction IDs to allow recipients to deduplicate events
+- **Retry logic** — Future implementations should document retry backoff strategy (see issue #104)
+
+### Future Work
+
+This proposal does NOT include:
+
+- Webhook delivery infrastructure
+- HTTP server implementation
+- Retry and backoff logic
+- Idempotency guarantees beyond transaction IDs
+- Production-grade monitoring and alerting
+- Rate limiting or throttling
+
+Implementers should reference:
+- Issue #104 for retry and idempotency expectations
+- `docs/EVENT_INDEXING.md` for event consumer best practices
+- `docs/SECURITY.md` for general security guidelines
+
+### Local Development Testing
+
+For local testing of webhook consumers, developers may:
+
+1. Set up a local HTTP endpoint (e.g., using `ngrok` or a simple HTTP server)
+2. Configure the webhook URL via environment variable
+3. Manually trigger test events or use contract test utilities
+4. Validate JSON schema and payload structure
+5. Test error handling and retry scenarios
+
+**Remember:** Any local relay script or stub server is strictly for development and should be clearly marked as non-production code.
