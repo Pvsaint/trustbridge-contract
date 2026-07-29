@@ -1,4 +1,4 @@
-#![no_std]
+git#![no_std]
 // Clippy pedantic rollout — Phase 1 (warn-only while fixes land incrementally).
 // See docs/CLIPPY_PEDANTIC_PLAN.md for the full phased plan and allow-list policy.
 #![warn(
@@ -19,6 +19,7 @@ mod storage;
 mod utils;
 mod version;
 
+pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
 pub use error::ContractError;
 pub use events::{
     PausedEvent, RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
@@ -43,6 +44,39 @@ use crate::storage::{
     set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance, WasmAttestation,
     WasmProvenance, ADMIN_KEY,
 };
+
+/// Valid revoke reason codes for `revoke_verification`.
+///
+/// These codes are emitted in `VerificationRevokedEvent.reason_code` and
+/// validated on-chain so only known reasons are accepted.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum RevokeReason {
+    /// GitHub identity proof was found to be invalid or fabricated.
+    IdentityFraud = 1,
+    /// Account was compromised or the private key was leaked.
+    CompromisedKey = 2,
+    /// Regulatory or legal requirement to revoke verification.
+    Regulatory = 3,
+    /// Duplicate registration detected for the same GitHub identity.
+    DuplicateRegistration = 4,
+    /// Operator error during the verification process.
+    OperatorError = 5,
+    /// The contributor requested removal under GDPR or similar privacy law.
+    GdprErasure = 6,
+    /// Any other reason not covered by the specific codes above.
+    Other = 99,
+}
+
+impl RevokeReason {
+    /// Returns `true` if `code` is a valid `RevokeReason` discriminant.
+    pub fn is_valid(code: u32) -> bool {
+        matches!(
+            code,
+            1 | 2 | 3 | 4 | 5 | 6 | 99
+        )
+    }
+}
 
 /// Version this WASM was built at. Instances whose stored version predates
 /// version tracking fall back to this.
@@ -654,6 +688,103 @@ impl TrustBridgeContract {
         Ok(extended)
     }
 
+    /// Removes multiple registrations in a single invocation, collecting
+    /// per-entry errors rather than aborting on the first failure.
+    ///
+    /// This is the batched form of [`remove`][Self::remove], intended for
+    /// admin workflows that need to clean up many stale or disputed
+    /// registrations efficiently. Doing that as N separate invocations costs
+    /// N transactions, N signatures, and N rounds of ledger overhead — this
+    /// is one.
+    ///
+    /// **Partial success is the point.** A username that cannot be removed
+    /// (e.g. not registered, paused contract, auth failure) does not abort
+    /// the batch; it is counted as a failure in the returned
+    /// [`BatchSummary`] and the rest proceed. A cleanup of 100 contributors
+    /// must not be lost wholesale because one entry was already removed or
+    /// the caller lacks permission for a particular record.
+    ///
+    /// Each successfully removed username publishes a [`RemovedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin. Unlike [`remove`][Self::remove],
+    /// which also allows the registrant to self-remove, this batch variant
+    /// requires admin auth — a registrant who wants to remove only their own
+    /// record should call the single-entry version.
+    ///
+    /// # Errors (abort the entire batch)
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::InvalidBatchSize`] if `usernames` is empty or exceeds
+    ///   the configured maximum batch size.
+    ///
+    /// # Per-entry outcomes (counted in BatchSummary)
+    ///
+    /// | Outcome | Counted as | Notes |
+    /// |---------|------------|-------|
+    /// | Registered, caller is admin | `successful` | Record removed, `RemovedEvent` published |
+    /// | Not registered | `failed` | Skipped, batch continues |
+    /// | Registered but caller not authorized | `failed` | Should not happen with admin auth, but tracked |
+    pub fn batch_remove(
+        env: Env,
+        caller: Address,
+        usernames: Vec<String>,
+    ) -> Result<BatchSummary, ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let config = BatchConfig::default();
+        if !config.is_valid_batch_size(usernames.len()) {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        caller.require_auth();
+
+        // Admin must be the caller for batch_remove (stricter than single remove).
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let total = usernames.len();
+        let mut successful: u32 = 0;
+
+        for username in usernames.iter() {
+            // Attempt the remove. Silently skip failures (not registered, etc.)
+            // so one bad entry does not kill the whole batch.
+            let record = match get_record(&env, &username) {
+                Some(r) => r,
+                None => continue, // not registered — count as failure below
+            };
+
+            // With admin auth, the auth check inside single remove would pass,
+            // but we replicate the full logic here to be explicit.
+            let timestamp = env.ledger().timestamp();
+            let stellar_address = record.stellar_address.clone();
+
+            remove_record(&env, &username);
+            remove_from_index(&env, &username);
+            set_count(&env, get_count(&env).saturating_sub(1));
+
+            if record.verified {
+                set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+            }
+
+            RemovedEvent {
+                github_username: username.clone(),
+                stellar_address,
+                timestamp,
+            }
+            .publish(&env);
+
+            successful = successful.saturating_add(1);
+        }
+
+        Ok(BatchSummary::new(total, successful))
+    }
+
     /// Looks up the `ContributorRecord` for `github_username`. Returns `None` if not registered.
     ///
     /// Read-only; no auth required. Use this for payout address resolution in GitHub Actions
@@ -876,6 +1007,8 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
         // Clear pending reverify flag upon successful verification
         clear_pending_reverify(&env, &github_username);
         let timestamp = env.ledger().timestamp();
@@ -890,13 +1023,22 @@ impl TrustBridgeContract {
     }
 
     /// Revokes verification for a registered contributor.
+    ///
+    /// `reason_code` must be one of the valid `RevokeReason` codes. See the
+    /// `RevokeReason` enum for the supported values and their meanings.
     pub fn revoke_verification(
         env: Env,
         caller: Address,
         github_username: String,
+        reason_code: u32,
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
+
+        // Validate reason code before auth to fail fast on malformed input.
+        if !RevokeReason::is_valid(reason_code) {
+            return Err(ContractError::InvalidReasonCode);
+        }
 
         caller.require_auth();
 
@@ -922,6 +1064,7 @@ impl TrustBridgeContract {
             github_username: github_username.clone(),
             stellar_address: record.stellar_address.clone(),
             timestamp,
+            reason_code,
         }
         .publish(&env);
 
@@ -4003,6 +4146,248 @@ mod test {
         });
     }
 
+    // ── batch_remove (Wave #batch) ─────────────────────────────────────────
+    //
+    // `batch_remove` is the batched form of `remove`, intended for admin
+    // workflows that need to clean up many stale or disputed registrations
+    // efficiently. Partial success is the point: a username that cannot be
+    // removed does not abort the batch.
+
+    /// batch_remove happy path: admin removes multiple registered users.
+    #[test]
+    fn test_batch_remove_all_succeed() {
+        let env = Env::default();
+        let (admin, user1, user2, contract_id) = setup(&env);
+        let user3 = Address::generate(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone())
+                .unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone())
+                .unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "carol"), user3.clone())
+                .unwrap();
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 3);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![
+                &env,
+                username(&env, "alice"),
+                username(&env, "bob"),
+                username(&env, "carol"),
+            ];
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames).unwrap();
+            assert_eq!(summary.total, 3);
+            assert_eq!(summary.successful, 3);
+            assert_eq!(summary.failed, 0);
+            assert_eq!(summary.success_rate, 100);
+            assert!(summary.all_successful());
+
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0);
+            assert_eq!(stats.verified, 0);
+        });
+    }
+
+    /// batch_remove partial success: some usernames are registered, some are not.
+    #[test]
+    fn test_batch_remove_partial_success() {
+        let env = Env::default();
+        let (admin, user1, _user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone())
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![
+                &env,
+                username(&env, "alice"),   // registered → succeeds
+                username(&env, "ghost"),   // not registered → skipped (counted as failed)
+            ];
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames).unwrap();
+            assert_eq!(summary.total, 2);
+            assert_eq!(summary.successful, 1);
+            assert_eq!(summary.failed, 1);
+            assert_eq!(summary.success_rate, 50);
+            assert!(!summary.all_successful());
+            assert!(summary.any_successful());
+
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0, "alice was removed");
+        });
+    }
+
+    /// batch_remove all fail: none of the usernames are registered.
+    #[test]
+    fn test_batch_remove_all_fail() {
+        let env = Env::default();
+        let (admin, _user1, _user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![
+                &env,
+                username(&env, "ghost1"),
+                username(&env, "ghost2"),
+            ];
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames).unwrap();
+            assert_eq!(summary.total, 2);
+            assert_eq!(summary.successful, 0);
+            assert_eq!(summary.failed, 2);
+            assert_eq!(summary.success_rate, 0);
+            assert!(!summary.all_successful());
+            assert!(!summary.any_successful());
+
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0, "registry must remain untouched");
+        });
+    }
+
+    /// batch_remove rejects empty list with InvalidBatchSize.
+    #[test]
+    fn test_batch_remove_empty_rejected() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            let result =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames);
+            assert_eq!(result, Err(ContractError::InvalidBatchSize));
+        });
+    }
+
+    /// batch_remove rejects too-large list with InvalidBatchSize.
+    #[test]
+    fn test_batch_remove_over_limit_rejected() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let limit = crate::batch::BatchConfig::default().max_batch_size;
+            let mut usernames: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&env);
+            for i in 0..=limit {
+                usernames.push_back(username(&env, &alloc::format!("user{i}")));
+            }
+            let result =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames);
+            assert_eq!(result, Err(ContractError::InvalidBatchSize));
+        });
+    }
+
+    /// batch_remove is blocked while the contract is paused.
+    #[test]
+    fn test_batch_remove_blocked_while_paused() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user.clone())
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![&env, username(&env, "alice")];
+            let result =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames);
+            assert_eq!(result, Err(ContractError::Paused));
+        });
+    }
+
+    /// batch_remove requires initialization.
+    #[test]
+    fn test_batch_remove_not_initialized() {
+        let env = Env::default();
+        let contract_id = env.register(TrustBridgeContract, ());
+        let admin = Address::generate(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![&env, username(&env, "alice")];
+            let result =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames);
+            assert_eq!(result, Err(ContractError::NotInitialized));
+        });
+    }
+
+    /// batch_remove rejects non-admin caller with NotAuthorized.
+    #[test]
+    fn test_batch_remove_non_admin_rejected() {
+        let env = Env::default();
+        let (_admin, _user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![&env, username(&env, "alice")];
+            let result =
+                TrustBridgeContract::batch_remove(env.clone(), other.clone(), usernames);
+            assert_eq!(result, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    /// batch_remove with mixed verified/unverified records updates counters correctly.
+    #[test]
+    fn test_batch_remove_mixed_verified_state() {
+        let env = Env::default();
+        let (admin, user1, user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone())
+                .unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone())
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "alice"))
+                .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 2);
+            assert_eq!(stats.verified, 1);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![
+                &env,
+                username(&env, "alice"), // verified
+                username(&env, "bob"),   // unverified
+            ];
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), usernames).unwrap();
+            assert_eq!(summary.total, 2);
+            assert_eq!(summary.successful, 2);
+
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0);
+            assert_eq!(stats.verified, 0);
+        });
+    }
+
     /// #114-verify-error-codes: all verify/revoke-relevant error codes match their ABI discriminants.
     #[test]
     fn test_verify_revoke_negative_error_codes_match_abi() {
@@ -4012,5 +4397,149 @@ mod test {
         assert_eq!(ContractError::AlreadyVerified.code(), 5);
         assert_eq!(ContractError::NotVerified.code(), 6);
         assert_eq!(ContractError::Paused.code(), 7);
+    }
+
+    // ── Revoke reason code validation (Wave #19) ───────────────────────────────
+    //
+    // `revoke_verification` now requires a `reason_code` parameter. Valid codes
+    // are defined in the `RevokeReason` enum; invalid codes return
+    // `InvalidReasonCode` (code 15) before auth or any storage mutation.
+
+    /// All `RevokeReason` variants are accepted by `revoke_verification`.
+    #[test]
+    fn test_revoke_verification_accepts_all_valid_reason_codes() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        let valid_codes = [1, 2, 3, 4, 5, 6, 99];
+        for &code in &valid_codes {
+            env.mock_all_auths();
+            env.as_contract(&contract_id, || {
+                TrustBridgeContract::revoke_verification(
+                    env.clone(),
+                    admin.clone(),
+                    username(&env, "octocat"),
+                    code,
+                )
+                .unwrap();
+                assert!(
+                    !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                        .unwrap()
+                        .verified,
+                    "revoke with reason code {code} must clear verified"
+                );
+            });
+
+            // Re-verify for the next iteration
+            env.mock_all_auths();
+            env.as_contract(&contract_id, || {
+                TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                    .unwrap();
+            });
+        }
+    }
+
+    /// Invalid reason codes return `InvalidReasonCode` (code 15) and leave the
+    /// record unmodified.
+    #[test]
+    fn test_revoke_verification_rejects_invalid_reason_code() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        let invalid_codes = [0, 7, 8, 9, 10, 11, 50, 98, 100, u32::MAX];
+        for &code in &invalid_codes {
+            env.mock_all_auths();
+            env.as_contract(&contract_id, || {
+                let result = TrustBridgeContract::revoke_verification(
+                    env.clone(),
+                    admin.clone(),
+                    username(&env, "octocat"),
+                    code,
+                );
+                assert_eq!(
+                    result,
+                    Err(ContractError::InvalidReasonCode),
+                    "expected InvalidReasonCode for reason code {code}"
+                );
+                assert_eq!(ContractError::InvalidReasonCode.code(), 15);
+
+                // Record must remain verified and verified count unchanged
+                assert!(
+                    TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                        .unwrap()
+                        .verified,
+                    "failed revoke must not clear verified flag"
+                );
+                assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+            });
+        }
+    }
+
+    /// `VerificationRevokedEvent` includes the `reason_code` that was supplied.
+    #[test]
+    fn test_revoke_verification_event_includes_reason_code() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                2, // CompromisedKey
+            )
+            .unwrap();
+
+            let expected = VerificationRevokedEvent {
+                github_username: username(&env, "octocat"),
+                stellar_address: user.clone(),
+                timestamp: env.ledger().timestamp(),
+                reason_code: 2,
+            };
+
+            assert_eq!(
+                env.events().all(),
+                soroban_sdk::vec![
+                    &env,
+                    (
+                        contract_id.clone(),
+                        expected.topics(&env),
+                        expected.data(&env),
+                    )
+                ],
+                "VerificationRevokedEvent must include the supplied reason_code"
+            );
+        });
     }
 }
