@@ -105,11 +105,16 @@ The checklist covers deploy → initialize → register → verify → export �
 
 Before every mainnet deploy, complete both confirmation steps:
 
-1. **Build hash pin** — confirm the WASM hash matches the tagged release commit:
+1. **Build hash pin** — confirm the WASM hash matches the pinned value in `wasm-hash.pin`:
    ```bash
+   make wasm-hash-pin
+   # or manually:
    sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm
    ```
-   Record the hash in your deploy runbook and verify it against the CI build artifact.
+   CI enforces this check automatically via the _Compute and verify WASM hash pin_ step.
+   If the hash has intentionally changed (new release), run `make wasm-hash-update`, commit
+   the updated `wasm-hash.pin`, and include before/after hashes in the PR description.
+   Record the final hash in your deploy runbook and verify it against the CI build artifact.
 
 2. **Human confirmation** — set `CONFIRM_MAINNET=yes` to proceed:
    ```bash
@@ -408,6 +413,46 @@ See [STORAGE_RENT.md](STORAGE_RENT.md) for how simulation fits into the broader 
    sane?, optional Horizon lag)
 
 See [SECURITY.md](SECURITY.md) for operational security guidance.
+
+---
+
+## WASM Hash Verification
+
+The release WASM artifact is pinned by SHA-256 in `wasm-hash.pin`. CI fails the build when the
+artifact hash does not match the pinned value, preventing silent deploy of a wrong or tampered WASM.
+
+### How it works
+
+1. CI builds the WASM via `stellar contract build`.
+2. The _Compute and verify WASM hash pin_ CI step runs `sha256sum` on the artifact.
+3. The computed hash is compared to the value in `wasm-hash.pin`.
+4. A mismatch fails CI with clear instructions to update the pin.
+
+### Local verification
+
+```bash
+# Verify the current build matches the pin:
+make wasm-hash-pin
+
+# After an intentional WASM change, update the pin:
+make wasm-hash-update
+git add wasm-hash.pin
+git commit -m "chore: bump wasm-hash.pin after <feature>"
+```
+
+### Updating the pin (intentional WASM changes)
+
+1. Make your contract changes and build: `make build`.
+2. Run `make wasm-hash-update` to rewrite `wasm-hash.pin` with the new hash.
+3. Commit `wasm-hash.pin` alongside the contract change.
+4. Include before/after hashes in the PR description.
+5. CI will verify the committed pin matches the rebuilt artifact.
+
+### Mainnet pre-deploy checklist addition
+
+- [ ] `make wasm-hash-pin` passes locally on the release commit.
+- [ ] `wasm-hash.pin` committed hash matches the CI artifact hash shown in CI logs.
+- [ ] Hash recorded in deploy runbook before running `make deploy-mainnet`.
 
 ---
 
