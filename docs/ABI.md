@@ -1154,6 +1154,7 @@ get_all_registered,100,...,...
 | `test_bench_export_cpu_cost` | `get_all_registered` at registry sizes 10, 20, 40, 80 |
 | `test_bench_username_case_normalization` | `usernames_match` at 10, 50, 100, 200 comparisons (`make bench-username`) |
 | `test_bench_core_operation_cpu_cost` | `register`, `get_address`, `get_stats` |
+| `test_bench_double_verify_rejection` | Rejected double-verify (`AlreadyVerified`) versus accepted `verify` (Issue #58) |
 | `test_bench_failure_path_costs_less_than_success` | Rejected `verify` versus accepted `verify` |
 | `test_bench_max_length_username_register` | `register` at a 1-character username versus the maximum accepted length (`MAX_USERNAME_LEN`, currently 39 — read `max_username_len()` rather than hardcoding it) (`make bench-max-username`, Issue #91) |
 
