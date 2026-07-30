@@ -13,17 +13,20 @@ ADMIN       ?= $(shell $(STELLAR) keys address $(SOURCE) 2>/dev/null || echo "")
 CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
+CALLER      ?=
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
 REGISTER_BUDGET_CPU_MAX ?= 25000000
 REGISTER_BUDGET_MEM_MAX ?= 300000
 BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
+EXPORT_FILE ?= registry-export-$(NETWORK).json
+ADMIN_SOURCE ?=
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint docs docs-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-	invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
-	bench-register-budget
+        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+        export-registry validate-registry
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -203,21 +206,21 @@ invoke-stats: require-contract-id ## Read registry statistics (read-only)
 		--network $(NETWORK) \
 		-- get_stats
 
-invoke-verify: ## Mark a contributor as verified (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+invoke-verify: ## Mark a contributor as verified (admin or Verifier-role) (CALLER, GITHUB_USER, SOURCE, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		--send=yes \
-		-- verify --github-username $(GITHUB_USER)
+		-- verify --caller $(CALLER) --github-username $(GITHUB_USER)
 
-invoke-revoke-verification: ## Revoke contributor verification (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+invoke-revoke-verification: ## Revoke contributor verification (admin or Verifier-role) (CALLER, GITHUB_USER, SOURCE, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		--send=yes \
-		-- revoke_verification --github-username $(GITHUB_USER)
+		-- revoke_verification --caller $(CALLER) --github-username $(GITHUB_USER)
 
 invoke-get-all-registered: ## Export full registry mapping (admin-only) (SOURCE=admin, CONTRACT_ID)
 	$(STELLAR) contract invoke \
@@ -256,102 +259,8 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 		--send=yes \
 		-- set_paused --paused $(PAUSED)
 
-# ── Simulate-register gas reporting (Issue #111) ─────────────────────────────
-#
-# These targets wrap `stellar contract invoke ... simulate` for the `register`
-# function and print resource/fee fields WITHOUT spending funds or submitting
-# a transaction.  They are the baseline gas-reporting tool for Wave invoke budgets.
-#
-# Usage:
-#   make simulate-register CONTRACT_ID=C... GITHUB_USER=octocat STELLAR_ADDR=G...
-#   make simulate-register-max CONTRACT_ID=C... STELLAR_ADDR=G...
-#   make simulate-register-compare CONTRACT_ID=C... STELLAR_ADDR=G...
-#
-# Required variables:
-#   CONTRACT_ID    – deployed contract address (C...)
-#   STELLAR_ADDR   – the Stellar G-address to register
-#   SOURCE         – Stellar CLI identity to sign the simulation (default: default)
-#   NETWORK        – testnet | mainnet (default: testnet)
-#
-# Optional variables:
-#   GITHUB_USER    – username for baseline simulation (default: octocat)
-#   MAX_GITHUB_USER – 39-char username for max-length simulation
+export-registry: require-contract-id ## Export full registry to JSON (admin) — see docs/DEPLOYMENT.md#registry-export--import (SOURCE=admin, CONTRACT_ID, EXPORT_FILE)
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) NETWORK=$(NETWORK) OUTPUT_FILE=$(EXPORT_FILE) ./scripts/export_registry.sh
 
-GITHUB_USER      ?= octocat
-MAX_GITHUB_USER  ?= aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-SIMULATE_OUT     ?= simulate-register-results.txt
-
-.PHONY: simulate-register simulate-register-max simulate-register-compare \
-        require-stellar-addr
-
-require-stellar-addr:
-	@if [ -z "$(STELLAR_ADDR)" ]; then \
-		echo "ERROR: set STELLAR_ADDR=<G...> for this target."; exit 1; \
-	fi
-
-## Simulate register with a baseline short username (no --send, no fees spent).
-## Prints resource fields: cpu_instructions, memory_bytes, min_resource_fee.
-simulate-register: require-contract-id require-stellar-addr ## Simulate register (baseline username, no funds spent)
-	@echo "=== simulate-register: baseline username '$(GITHUB_USER)' ==="
-	@echo "Network: $(NETWORK)  Contract: $(CONTRACT_ID)"
-	@echo "NOTE: simulation only — no transaction submitted, no fees charged."
-	$(STELLAR) contract invoke \
-		--id $(CONTRACT_ID) \
-		--source-account $(SOURCE) \
-		--network $(NETWORK) \
-		-- register \
-		--github-username $(GITHUB_USER) \
-		--stellar-address $(STELLAR_ADDR)
-	@echo ""
-	@echo "Interpretation:"
-	@echo "  cpu_instructions  – metered Wasm CPU cost for this invocation"
-	@echo "  mem_bytes         – metered memory footprint in bytes"
-	@echo "  min_resource_fee  – minimum fee in stroops (1 XLM = 10 000 000 stroops)"
-	@echo "  See docs/DEPLOYMENT.md#simulate-register for field definitions."
-
-## Simulate register with the maximum-length username (39 chars, no --send).
-## Compare output against simulate-register to measure username-length impact on cost.
-simulate-register-max: require-contract-id require-stellar-addr ## Simulate register with max-length username (39 chars)
-	@echo "=== simulate-register: max-length username (39 chars) ==="
-	@echo "Network: $(NETWORK)  Contract: $(CONTRACT_ID)"
-	@echo "NOTE: simulation only — no transaction submitted, no fees charged."
-	$(STELLAR) contract invoke \
-		--id $(CONTRACT_ID) \
-		--source-account $(SOURCE) \
-		--network $(NETWORK) \
-		-- register \
-		--github-username $(MAX_GITHUB_USER) \
-		--stellar-address $(STELLAR_ADDR)
-	@echo ""
-	@echo "Interpretation: compare cpu_instructions and min_resource_fee"
-	@echo "  against simulate-register (baseline) to see the username-length delta."
-
-## Run both baseline and max-length simulations and write results to $(SIMULATE_OUT).
-## Useful for diffing across branches or contract versions.
-simulate-register-compare: require-contract-id require-stellar-addr ## Compare baseline vs max-length simulate-register, write to $(SIMULATE_OUT)
-	@echo "=== simulate-register: baseline vs max-length comparison ===" | tee $(SIMULATE_OUT)
-	@echo "Network: $(NETWORK)  Contract: $(CONTRACT_ID)" | tee -a $(SIMULATE_OUT)
-	@echo "Date: $$(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a $(SIMULATE_OUT)
-	@echo "" | tee -a $(SIMULATE_OUT)
-	@echo "--- baseline (username: '$(GITHUB_USER)') ---" | tee -a $(SIMULATE_OUT)
-	$(STELLAR) contract invoke \
-		--id $(CONTRACT_ID) \
-		--source-account $(SOURCE) \
-		--network $(NETWORK) \
-		-- register \
-		--github-username $(GITHUB_USER) \
-		--stellar-address $(STELLAR_ADDR) \
-		2>&1 | tee -a $(SIMULATE_OUT)
-	@echo "" | tee -a $(SIMULATE_OUT)
-	@echo "--- max-length (username: 39 chars) ---" | tee -a $(SIMULATE_OUT)
-	$(STELLAR) contract invoke \
-		--id $(CONTRACT_ID) \
-		--source-account $(SOURCE) \
-		--network $(NETWORK) \
-		-- register \
-		--github-username $(MAX_GITHUB_USER) \
-		--stellar-address $(STELLAR_ADDR) \
-		2>&1 | tee -a $(SIMULATE_OUT)
-	@echo "" | tee -a $(SIMULATE_OUT)
-	@echo "Results written to $(SIMULATE_OUT)"
-	@echo "See docs/DEPLOYMENT.md#simulate-register for interpretation guide."
+validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin for full diff)
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)

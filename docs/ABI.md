@@ -396,10 +396,9 @@ stellar contract invoke --id $ID --source admin --network testnet \
   -- get_all_registered
 ```
 
-**Scale warning:** past ~100 contributors prefer paginated export
-([Issue #1](https://github.com/Stellar-TrustBridge/trustbridge-contract/issues/1),
-Issue #143). See [Paginated export](#paginated-export-issue-1--143) below and
-[DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).
+For a repeatable JSON export (backups, dashboard migrations, audit
+snapshots) that pages through `get_registered_paginated` instead of this
+single-call export, see [Registry Export & Import](DEPLOYMENT.md#registry-export--import).
 
 ---
 
@@ -848,6 +847,11 @@ Updates the contract schema version following a WASM upgrade. Target version mus
 ## Events
 
 All events are defined with `#[contractevent]` and include a topic field for filtering.
+
+For idempotent handling of these events by indexers — replays, gaps, and
+duplicate deliveries of `RegisteredEvent` / `VerifiedEvent` /
+`VerificationRevokedEvent` / `RemovedEvent` — see
+[DASHBOARD_SYNC.md — Event Idempotency & Replay Handling](DASHBOARD_SYNC.md#event-idempotency--replay-handling).
 
 ### RegisteredEvent
 

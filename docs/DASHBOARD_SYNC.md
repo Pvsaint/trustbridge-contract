@@ -60,219 +60,97 @@ in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
----
+## Event Idempotency & Replay Handling
 
-## Development Webhook Payload (Proposed)
+Issue #135: Horizon/RPC replays and worker retries are normal operating conditions, not
+failure modes. An indexer that treats every delivery as new will double-count
+registrations or resurrect a contributor after they were removed. This
+section is the spec for handling replays, gaps, and duplicate deliveries of
+`RegisteredEvent`, `VerifiedEvent`, `VerificationRevokedEvent`, and
+`RemovedEvent` without corrupting off-chain state.
 
-**STATUS: NOT IMPLEMENTED — Development proposal only**
+### Idempotency key
 
-This section documents a proposed JSON payload format for development webhooks that could translate contract events into HTTP callbacks for dashboard prototypes. This is **not production infrastructure** and is provided solely for future development planning.
+None of the contract's events carry a sequence number in their payload — see
+`src/events.rs`. The payload alone (`github_username`, `stellar_address`,
+`timestamp`) is not unique: the same contributor can be registered, removed,
+and re-registered, producing multiple `RegisteredEvent`s with the same topic.
 
-### Purpose
+The uniqueness comes from the delivery envelope Horizon/RPC attaches to every
+event, not from the contract payload. Key every stored event on:
 
-Enable local development and testing of dashboard integrations by providing a standardized webhook payload format for each registry event type. Future implementations may change these formats based on actual requirements.
-
-### Event Payload Formats
-
-All webhook payloads follow a common structure with event-specific fields:
-
-#### Base Payload Structure
-
-```json
-{
-  "event": "<event_name>",
-  "ledger": 123456,
-  "timestamp": "2026-07-28T12:34:56Z",
-  "transaction_id": "abc123...",
-  "version": 1
-}
+```
+(github_username, event_type, ledger_sequence, tx_hash)
 ```
 
-#### RegisteredEvent
+- `event_type` — the event's topic symbol (`registered_event`,
+  `verified_event`, `verification_revoked_event`, `removed_event`, …)
+- `ledger_sequence` — the ledger the event was emitted in; also the ordering
+  key (see "Out-of-order handling" below)
+- `tx_hash` — the transaction hash that emitted it; distinguishes two events
+  of the same type for the same username emitted in different transactions
+  within the same ledger
 
-Emitted when a contributor registers their GitHub username with a Stellar address.
+`(ledger_sequence, tx_hash)` alone is sufficient to deduplicate a single
+delivery; `github_username` and `event_type` are included so a lookup by
+contributor doesn't require a join back to raw envelope data.
+
+### Event → action → duplicate handling
+
+| Event | Expected indexer action | Duplicate delivery |
+|-------|--------------------------|---------------------|
+| `RegisteredEvent` | Upsert `(github_username → stellar_address)`; reset local `verified` to `false` unless a `VerifiedEvent` for the same `(ledger_sequence, tx_hash)` ordering is already applied | No-op — same key already applied, re-applying the same payload is a harmless overwrite |
+| `VerifiedEvent` | Set local `verified = true` for `github_username` | No-op if the key was already applied; if `verified` is already `true`, applying it again is still a safe overwrite |
+| `VerificationRevokedEvent` | Set local `verified = false` for `github_username` | Same as above — idempotent overwrite |
+| `RemovedEvent` | Delete (or tombstone) the local record for `github_username` | No-op if already deleted/tombstoned |
+
+Applying the same event twice is always safe **provided duplicates are
+detected by key first** — every action above is a last-write-wins overwrite
+on a single field or record, not an increment or counter update. Never
+implement indexer-side counters (e.g. "times verified") by counting event
+occurrences; use `get_stats()` / `get_public_paginated` reads against the
+contract as the source of truth for aggregate counts instead.
+
+### Out-of-order handling
+
+Horizon delivery order is not guaranteed to match ledger order under replay
+or catch-up conditions. Two rules keep out-of-order delivery from producing
+the wrong final state:
+
+1. **Order by `(ledger_sequence, tx_hash-relative-order)` before applying,
+   not by delivery order.** If a `RemovedEvent` and a later `RegisteredEvent`
+   for the same username arrive out of order, applying them in delivery order
+   instead of ledger order can leave the record deleted when it should exist
+   (or vice versa).
+2. **Track the last-applied `ledger_sequence` per `github_username`.** Before
+   applying an event, compare its `ledger_sequence` to the last one recorded
+   for that username. If the incoming event is older, it is a gap-fill or a
+   late replay of something already superseded — record it for audit purposes
+   but do not let it overwrite newer state.
+
+For gaps (a missing ledger range in the delivery stream), reconcile against
+on-chain state directly rather than waiting for the missing event: call
+`get_public_paginated` (or `get_address` for a single username) and treat its
+result as authoritative. The event stream is a change-notification
+optimization; the contract's own storage is always the ground truth.
+
+### Example: duplicate delivery fixture
 
 ```json
 {
-  "event": "registered",
-  "ledger": 123456,
-  "timestamp": "2026-07-28T12:34:56Z",
-  "transaction_id": "abc123...",
+  "event_type": "verified_event",
   "github_username": "octocat",
-  "stellar_address": "GBXXXX...",
-  "version": 1
+  "stellar_address": "GABCDEF...",
+  "timestamp": 1732800000,
+  "ledger_sequence": 1000042,
+  "tx_hash": "a1b2c3..."
 }
 ```
 
-#### RemovedEvent
+A replay test in the sibling indexer repo applies this record twice and
+asserts the local `verified` flag is `true` exactly once — i.e. the second
+apply is detected as a duplicate by `(ledger_sequence, tx_hash)` and produces
+no state change, no duplicate row, and no double count in any aggregate.
 
-Emitted when a registration is deleted (by contributor or admin).
-
-```json
-{
-  "event": "removed",
-  "ledger": 123457,
-  "timestamp": "2026-07-28T13:45:12Z",
-  "transaction_id": "def456...",
-  "github_username": "octocat",
-  "stellar_address": "GBXXXX...",
-  "version": 1
-}
-```
-
-#### VerifiedEvent
-
-Emitted when an admin marks a contributor as verified after off-chain identity confirmation.
-
-```json
-{
-  "event": "verified",
-  "ledger": 123458,
-  "timestamp": "2026-07-28T14:20:33Z",
-  "transaction_id": "ghi789...",
-  "github_username": "octocat",
-  "stellar_address": "GBXXXX...",
-  "version": 1
-}
-```
-
-#### VerificationRevokedEvent
-
-Emitted when an admin revokes a contributor's verification status.
-
-```json
-{
-  "event": "verification_revoked",
-  "ledger": 123459,
-  "timestamp": "2026-07-28T15:10:22Z",
-  "transaction_id": "jkl012...",
-  "github_username": "octocat",
-  "stellar_address": "GBXXXX...",
-  "version": 1
-}
-```
-
-#### UpgradedEvent
-
-Emitted when the contract WASM is upgraded.
-
-```json
-{
-  "event": "upgraded",
-  "ledger": 123460,
-  "timestamp": "2026-07-28T16:05:44Z",
-  "transaction_id": "mno345...",
-  "new_wasm_hash": "abc123def456...",
-  "version_major": 1,
-  "version_minor": 2,
-  "version_patch": 0,
-  "version": 1
-}
-```
-
-#### PausedEvent
-
-Emitted when the contract is paused by an admin (emergency stop).
-
-```json
-{
-  "event": "paused",
-  "ledger": 123461,
-  "timestamp": "2026-07-28T17:30:11Z",
-  "transaction_id": "pqr678...",
-  "admin": "GAXXXX...",
-  "version": 1
-}
-```
-
-#### UnpausedEvent
-
-Emitted when the contract is unpaused by an admin.
-
-```json
-{
-  "event": "unpaused",
-  "ledger": 123462,
-  "timestamp": "2026-07-28T18:15:55Z",
-  "transaction_id": "stu901...",
-  "admin": "GAXXXX...",
-  "version": 1
-}
-```
-
-#### RoleGrantedEvent
-
-Emitted when an admin grants a role to an address.
-
-```json
-{
-  "event": "role_granted",
-  "ledger": 123463,
-  "timestamp": "2026-07-28T19:00:00Z",
-  "transaction_id": "vwx234...",
-  "address": "GCXXXX...",
-  "role": 3,
-  "admin": "GAXXXX...",
-  "version": 1
-}
-```
-
-Role values:
-- `1` = Admin
-- `2` = Upgrader
-- `3` = Verifier
-
-#### RoleRevokedEvent
-
-Emitted when an admin revokes a role from an address.
-
-```json
-{
-  "event": "role_revoked",
-  "ledger": 123464,
-  "timestamp": "2026-07-28T20:45:30Z",
-  "transaction_id": "yz0567...",
-  "address": "GCXXXX...",
-  "admin": "GAXXXX...",
-  "version": 1
-}
-```
-
-### Security Considerations
-
-**IMPORTANT: Development webhook stubs must follow these security practices:**
-
-- **Never commit webhook URLs** — Always use environment variables (e.g., `WEBHOOK_URL`)
-- **Never commit tokens or secrets** — Use environment variables (e.g., `WEBHOOK_SECRET`)
-- **Implement webhook signature verification** — Recipients should validate payloads using HMAC or similar
-- **Use HTTPS only** — Never send webhooks over unencrypted HTTP in any environment
-- **Idempotency tokens** — Include transaction IDs to allow recipients to deduplicate events
-- **Retry logic** — Future implementations should document retry backoff strategy (see issue #104)
-
-### Future Work
-
-This proposal does NOT include:
-
-- Webhook delivery infrastructure
-- HTTP server implementation
-- Retry and backoff logic
-- Idempotency guarantees beyond transaction IDs
-- Production-grade monitoring and alerting
-- Rate limiting or throttling
-
-Implementers should reference:
-- Issue #104 for retry and idempotency expectations
-- `docs/EVENT_INDEXING.md` for event consumer best practices
-- `docs/SECURITY.md` for general security guidelines
-
-### Local Development Testing
-
-For local testing of webhook consumers, developers may:
-
-1. Set up a local HTTP endpoint (e.g., using `ngrok` or a simple HTTP server)
-2. Configure the webhook URL via environment variable
-3. Manually trigger test events or use contract test utilities
-4. Validate JSON schema and payload structure
-5. Test error handling and retry scenarios
-
-**Remember:** Any local relay script or stub server is strictly for development and should be clearly marked as non-production code.
+See [ABI.md — Events](ABI.md#events) for the full topic/payload reference per
+event type.

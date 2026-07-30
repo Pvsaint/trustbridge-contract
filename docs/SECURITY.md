@@ -14,7 +14,8 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 |--------|------------|
 | Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register |
 | Unauthorized removal | `caller` must auth as registrant or admin |
-| Unauthorized admin actions | `admin.require_auth()` on `verify`, `revoke_verification`, `get_all_registered`, and all admin-only functions |
+| Unauthorized admin-only actions | `admin.require_auth()` on `get_all_registered`, `get_registered_paginated`, `set_role`, `pause`/`unpause` |
+| Unauthorized verification actions | `caller.require_auth()` on `verify` / `revoke_verification`; `caller` must be the admin or hold `Role::Verifier` (checked via `has_role_or_admin`) — any other caller gets `NotAuthorized` |
 | Double initialization | `AlreadyInitialized` error |
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
