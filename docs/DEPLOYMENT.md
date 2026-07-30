@@ -177,6 +177,67 @@ change the public contract interface.
 
 ---
 
+## Bulk Verify CLI
+
+During Wave onboarding spikes, manual one-off `verify` calls do not scale. Use
+`scripts/bulk_verify.sh` (or the Make targets) to verify a list of usernames from a file.
+
+### Auth requirements
+
+`SOURCE` must be the admin or hold `Role::Verifier` on the contract. Verify off-chain
+GitHub identity for each username _before_ running the bulk verify.
+
+### Pacing
+
+The default pace is 500 ms between invocations. For large batches (>50 usernames) or when
+hitting HTTP 429 responses, increase `--pace-ms` to 1000–2000 ms.
+
+### Usage
+
+```bash
+# Create a file with one username per line
+echo -e "octocat\nsome-contributor" > usernames.txt
+
+# Dry-run (no transactions, confirm the list)
+make bulk-verify-dry-run CONTRACT_ID=C... SOURCE=admin-identity NETWORK=testnet
+
+# Execute with audit log
+make bulk-verify CONTRACT_ID=C... SOURCE=admin-identity NETWORK=testnet \
+    BULK_VERIFY_FILE=usernames.txt BULK_VERIFY_LOG=verify-audit.log
+
+# Increase pacing for large batches
+make bulk-verify CONTRACT_ID=C... SOURCE=admin-identity NETWORK=testnet \
+    BULK_VERIFY_PACE=1000
+```
+
+Or call the script directly:
+
+```bash
+bash scripts/bulk_verify.sh \
+    --file usernames.txt \
+    --contract $CONTRACT_ID \
+    --source admin-identity \
+    --network testnet \
+    --dry-run
+
+bash scripts/bulk_verify.sh \
+    --file usernames.txt \
+    --contract $CONTRACT_ID \
+    --source admin-identity \
+    --network testnet \
+    --continue-on-error \
+    --pace-ms 500 \
+    --audit-log verify-audit.log
+```
+
+Audit log lines are emitted to stdout and written to `--audit-log` file:
+
+```json
+{"timestamp":"2026-01-01T00:00:00Z","username":"octocat","network":"testnet","result":"ok","detail":"verified"}
+```
+
+---
+
 ## Using the Makefile
 
 | Target | Description |
@@ -187,8 +248,14 @@ change the public contract interface.
 | `make invoke-register` | Register a username |
 | `make invoke-lookup` | Read-only lookup |
 | `make invoke-stats` | Read statistics |
-| `make export-registry` | Export the full registry to JSON (see [Registry Export & Import](#registry-export--import)) |
-| `make validate-registry` | Validate an export file against live state, no writes |
+| `make invoke-verify` | Verify a contributor (admin or verifier role) |
+| `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
+| `make bulk-verify-dry-run` | Dry-run bulk verify from `BULK_VERIFY_FILE` |
+| `make bulk-verify` | Bulk verify with pacing and audit log |
+| `make bulk-revoke-dry-run` | Dry-run bulk revoke from `BULK_REVOKE_FILE` |
+| `make bulk-revoke` | Bulk revoke with audit log |
+| `make testnet-checklist` | Run the testnet smoke checklist |
+| `make demo-e2e` | Run the cross-repo E2E demo (register → verify → lookup → export) |
 
 Example registration:
 

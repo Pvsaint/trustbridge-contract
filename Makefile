@@ -228,7 +228,31 @@ invoke-stats: require-contract-id ## Read registry statistics (read-only)
 		--network $(NETWORK) \
 		-- get_stats
 
-invoke-verify: ## Mark a contributor as verified (admin or Verifier-role) (CALLER, GITHUB_USER, SOURCE, CONTRACT_ID)
+BULK_VERIFY_FILE ?= usernames.txt
+BULK_VERIFY_LOG  ?= bulk-verify-audit.log
+BULK_VERIFY_PACE ?= 500
+
+bulk-verify-dry-run: require-contract-id ## Dry-run bulk verify from BULK_VERIFY_FILE (no transactions submitted)
+	@echo "=== Dry-run bulk verify from $(BULK_VERIFY_FILE) ==="
+	@bash scripts/bulk_verify.sh \
+		--file $(BULK_VERIFY_FILE) \
+		--contract $(CONTRACT_ID) \
+		--source $(SOURCE) \
+		--network $(NETWORK) \
+		--dry-run \
+		--pace-ms $(BULK_VERIFY_PACE)
+
+bulk-verify: require-contract-id ## Bulk verify from BULK_VERIFY_FILE with audit log and pacing
+	@bash scripts/bulk_verify.sh \
+		--file $(BULK_VERIFY_FILE) \
+		--contract $(CONTRACT_ID) \
+		--source $(SOURCE) \
+		--network $(NETWORK) \
+		--audit-log $(BULK_VERIFY_LOG) \
+		--continue-on-error \
+		--pace-ms $(BULK_VERIFY_PACE)
+
+invoke-verify: ## Mark a contributor as verified (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
