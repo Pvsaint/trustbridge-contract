@@ -57,6 +57,8 @@ pub enum ContractError {
     InvalidBatchSize = 14,
     /// `revoke_verification` was called with an unrecognized reason code.
     InvalidReasonCode = 15,
+    /// The supplied Stellar address is the well-known zero/burn address.
+    ZeroAddress = 16,
 }
 
 impl ContractError {
@@ -85,6 +87,7 @@ impl ContractError {
             13 => Some(ContractError::UnattestedWasm),
             14 => Some(ContractError::InvalidBatchSize),
             15 => Some(ContractError::InvalidReasonCode),
+            16 => Some(ContractError::ZeroAddress),
             _ => None,
         }
     }
@@ -111,6 +114,7 @@ impl ContractError {
 // | 13   | UnattestedWasm       | upgrade                            |
 // | 14   | InvalidBatchSize     | extend_registry_ttl                |
 // | 15   | InvalidReasonCode    | revoke_verification                |
+// | 16   | ZeroAddress          | register                           |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

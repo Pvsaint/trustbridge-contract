@@ -13,7 +13,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 ```rust
 struct ContributorRecord {
     stellar_address: Address,
-    registered_at: u64,
+    registered_at: u32,  // u32 saves 4 bytes vs u64; sufficient until ~2106
     verified: bool,
 }
 ```
@@ -1257,7 +1257,7 @@ For GDPR compliance, the contract maps only technical identifiers: a GitHub user
 ### Data Inventory
 The contract stores no personal identifiable information (PII) like names, email addresses, or phone numbers. All data relating to a user is contained in the `ContributorRecord` struct:
 - `stellar_address: Address`
-- `registered_at: u64`
+- `registered_at: u32`
 - `verified: bool`
 
 ### Requesting Export
