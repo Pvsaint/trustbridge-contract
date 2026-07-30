@@ -55,6 +55,8 @@ pub enum ContractError {
     /// A batch call (e.g. `extend_registry_ttl`) was given zero or more items
     /// than `batch::BatchConfig::max_batch_size` allows.
     InvalidBatchSize = 14,
+    /// `revoke_verification` was called with an unrecognized reason code.
+    InvalidReasonCode = 15,
 }
 
 impl ContractError {
@@ -82,6 +84,7 @@ impl ContractError {
             12 => Some(ContractError::AttestationExpired),
             13 => Some(ContractError::UnattestedWasm),
             14 => Some(ContractError::InvalidBatchSize),
+            15 => Some(ContractError::InvalidReasonCode),
             _ => None,
         }
     }
@@ -107,6 +110,7 @@ impl ContractError {
 // | 12   | AttestationExpired   | attest_upgrade, upgrade            |
 // | 13   | UnattestedWasm       | upgrade                            |
 // | 14   | InvalidBatchSize     | extend_registry_ttl                |
+// | 15   | InvalidReasonCode    | revoke_verification                |
 //
 // `ContractError::from_code` is the reverse of this table for off-chain
 // consumers decoding a raw error code back into a typed variant.

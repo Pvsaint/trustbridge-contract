@@ -38,6 +38,8 @@ pub struct VerificationRevokedEvent {
     pub github_username: String,
     pub stellar_address: Address,
     pub timestamp: u64,
+    /// Numeric reason code explaining why verification was revoked.
+    pub reason_code: u32,
 }
 
 /// Emitted when the contract WASM is upgraded via `upgrade`.
