@@ -126,6 +126,28 @@ wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE
 
 check: fmt lint test build wasm-size ## Run full local quality gate
 
+wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
+	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
+	ACTUAL=$$(sha256sum "$$WASM" | awk '{print $$1}'); \
+	echo "WASM SHA-256: $$ACTUAL"; \
+	PINNED=$$(grep -v '^#' wasm-hash.pin | grep -v '^$$' | tr -d '[:space:]'); \
+	if [ "$$PINNED" = "PLACEHOLDER" ]; then \
+		echo "WARNING: wasm-hash.pin contains PLACEHOLDER — run 'make wasm-hash-update' to pin."; \
+	elif [ "$$ACTUAL" != "$$PINNED" ]; then \
+		echo "ERROR: WASM hash mismatch! Expected: $$PINNED  Actual: $$ACTUAL"; \
+		echo "Run 'make wasm-hash-update' if this change is intentional."; \
+		exit 1; \
+	else \
+		echo "OK: WASM hash matches pin."; \
+	fi
+
+wasm-hash-update: build ## Recompute and update wasm-hash.pin with the current build hash
+	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
+	HASH=$$(sha256sum "$$WASM" | awk '{print $$1}'); \
+	sed -i "s/^PLACEHOLDER$$/$$HASH/" wasm-hash.pin; \
+	sed -i "s/^[a-f0-9]\{64\}$$/$$HASH/" wasm-hash.pin; \
+	echo "Updated wasm-hash.pin to $$HASH"
+
 ci: check ## Alias for CI-equivalent checks (fmt + lint + test + build + wasm-size)
 
 clean: ## Remove build artifacts

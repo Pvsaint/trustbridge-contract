@@ -69,6 +69,30 @@ jobs:
       - name: Verify WASM artifact exists
         run: test -f target/wasm32v1-none/release/trustbridge-contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge-contract.wasm
 
+      - name: Compute and verify WASM hash pin
+        run: |
+          if [ -f target/wasm32v1-none/release/trustbridge-contract.wasm ]; then
+            WASM=target/wasm32v1-none/release/trustbridge-contract.wasm
+          else
+            WASM=target/wasm32-unknown-unknown/release/trustbridge-contract.wasm
+          fi
+          ACTUAL=$(sha256sum "$WASM" | awk '{print $1}')
+          echo "WASM SHA-256: $ACTUAL"
+          PINNED=$(grep -v '^#' wasm-hash.pin | grep -v '^$' | tr -d '[:space:]')
+          if [ "$PINNED" = "PLACEHOLDER" ]; then
+            echo "WARNING: wasm-hash.pin contains PLACEHOLDER — skipping hash comparison."
+            echo "Run 'make wasm-hash-update' after building to pin the current hash."
+          elif [ "$ACTUAL" != "$PINNED" ]; then
+            echo "ERROR: WASM hash mismatch!"
+            echo "  Expected (pinned): $PINNED"
+            echo "  Actual:            $ACTUAL"
+            echo "If this change is intentional, run 'make wasm-hash-update' locally,"
+            echo "commit the updated wasm-hash.pin, and open a PR with the new hash."
+            exit 1
+          else
+            echo "OK: WASM hash matches pin ($ACTUAL)"
+          fi
+
       - name: cargo doc (public API)
         run: cargo doc --no-deps
         env:
