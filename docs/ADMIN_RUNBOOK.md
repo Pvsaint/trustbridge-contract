@@ -365,6 +365,85 @@ stellar contract invoke \
 Store the packet in your compliance archive. On-chain events remain the
 append-only source of truth; this export is the operator-facing bundle.
 
+---
+
+## Bulk revoke (incident response)
+
+During a Wave incident requiring multiple revocations, use the bulk revoke CLI instead of
+manual one-by-one invocations. The script adds dry-run mode, confirmation prompts, and an
+audit log so every action is traceable.
+
+### Safety rules
+
+- **NETWORK never defaults to mainnet.** You must pass `--network mainnet` explicitly.
+- **Always dry-run first** to confirm the username list before sending transactions.
+- Failures do not abort the batch when `--continue-on-error` is set; the summary reports
+  per-line results. Without that flag, the script stops on the first error.
+- Audit log lines are emitted to stdout and optionally to a file; retain them for the
+  post-incident audit packet.
+
+### Audit log format
+
+One JSON line per username:
+
+```json
+{"timestamp":"2026-01-01T00:00:00Z","username":"octocat","network":"mainnet","result":"ok","detail":"revoked"}
+```
+
+`result` is one of: `ok`, `error`, `dry-run`.
+
+### Usage
+
+```bash
+# 1. Create a file with one GitHub username per line (blank lines and # comments ignored)
+cat > revoke-list.txt <<'EOF'
+octocat
+some-contributor
+EOF
+
+# 2. Dry-run first (no transactions, no fees)
+make bulk-revoke-dry-run \
+    CONTRACT_ID=C... SOURCE=admin-identity NETWORK=testnet \
+    BULK_REVOKE_FILE=revoke-list.txt
+
+# 3. Execute with audit log
+make bulk-revoke \
+    CONTRACT_ID=C... SOURCE=admin-identity NETWORK=testnet \
+    BULK_REVOKE_FILE=revoke-list.txt BULK_REVOKE_LOG=audit.log
+
+# 4. Mainnet (requires CONFIRM=yes)
+make bulk-revoke \
+    CONTRACT_ID=C... SOURCE=admin-identity NETWORK=mainnet \
+    BULK_REVOKE_FILE=revoke-list.txt BULK_REVOKE_LOG=audit-mainnet.log \
+    CONFIRM=yes
+```
+
+Or call the script directly for full flag control:
+
+```bash
+bash scripts/bulk_revoke.sh \
+    --file revoke-list.txt \
+    --contract $CONTRACT_ID \
+    --source admin-identity \
+    --network mainnet \
+    --dry-run
+
+bash scripts/bulk_revoke.sh \
+    --file revoke-list.txt \
+    --contract $CONTRACT_ID \
+    --source admin-identity \
+    --network mainnet \
+    --yes \
+    --continue-on-error \
+    --audit-log audit-mainnet.log
+```
+
+### Post-bulk-revoke audit
+
+Include `bulk-revoke-audit.log` in the post-incident audit packet alongside the individual
+`get_address` and `get_stats` snapshots described in
+[Post-incident audit export checklist](#post-incident-audit-export-checklist).
+
 ### Tabletop walkthrough (15 minutes)
 
 1. Pick a testnet/futurenet verified username (never rehearse first on mainnet).

@@ -236,7 +236,29 @@ invoke-verify: ## Mark a contributor as verified (admin or Verifier-role) (CALLE
 		--send=yes \
 		-- verify --caller $(CALLER) --github-username $(GITHUB_USER)
 
-invoke-revoke-verification: ## Revoke contributor verification (admin or Verifier-role) (CALLER, GITHUB_USER, SOURCE, CONTRACT_ID)
+BULK_REVOKE_FILE ?= usernames.txt
+BULK_REVOKE_LOG  ?= bulk-revoke-audit.log
+
+bulk-revoke-dry-run: require-contract-id ## Dry-run bulk revoke from BULK_REVOKE_FILE (no transactions submitted)
+	@echo "=== Dry-run bulk revoke from $(BULK_REVOKE_FILE) ==="
+	@bash scripts/bulk_revoke.sh \
+		--file $(BULK_REVOKE_FILE) \
+		--contract $(CONTRACT_ID) \
+		--source $(SOURCE) \
+		--network $(NETWORK) \
+		--dry-run
+
+bulk-revoke: require-contract-id ## Bulk revoke from BULK_REVOKE_FILE with audit log (--yes skips confirm, add CONFIRM=yes for mainnet)
+	@bash scripts/bulk_revoke.sh \
+		--file $(BULK_REVOKE_FILE) \
+		--contract $(CONTRACT_ID) \
+		--source $(SOURCE) \
+		--network $(NETWORK) \
+		--audit-log $(BULK_REVOKE_LOG) \
+		--continue-on-error \
+		$(if $(filter yes,$(CONFIRM)),--yes,)
+
+invoke-revoke-verification: ## Revoke contributor verification (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
