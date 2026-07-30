@@ -23,7 +23,7 @@ PKG_MANAGER  ?= pnpm
 EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
 
-.PHONY: help build build-legacy test fuzz bench bench-export bench-username fmt lint docs docs-check check ci clean \
+.PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         export-registry validate-registry
@@ -56,6 +56,9 @@ bench-export: ## Write export CPU benchmark results to $(BENCH_OUT)
 bench-username: ## Write username case-normalization benchmark results to $(NORM_BENCH_OUT)
 	cargo test test_bench_username_case_normalization -- --nocapture --test-threads=1 | tee $(NORM_BENCH_OUT)
 	@echo "Benchmark results written to $(NORM_BENCH_OUT)"
+
+bench-double-verify: ## Report CPU/memory cost of double-verify rejection vs successful verify
+	cargo test test_bench_double_verify_rejection -- --nocapture --test-threads=1
 
 bench-register-budget: ## Validate register cost stays under CPU/memory thresholds (baseline + max-length username)
 	@echo "Running register budget sampling (CPU<=$(REGISTER_BUDGET_CPU_MAX), MEM<=$(REGISTER_BUDGET_MEM_MAX))"

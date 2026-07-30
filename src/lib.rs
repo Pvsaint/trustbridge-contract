@@ -1,4 +1,4 @@
-git#![no_std]
+#![no_std]
 // Clippy pedantic rollout — Phase 1 (warn-only while fixes land incrementally).
 // See docs/CLIPPY_PEDANTIC_PLAN.md for the full phased plan and allow-list policy.
 #![warn(
@@ -3594,6 +3594,125 @@ mod test {
 
         assert!(baseline_cpu > 0, "baseline register cost was not metered");
         assert!(stressed_cpu > 0, "stressed register cost was not metered");
+    }
+    /// Measures the metered cost of a double-verify rejection — calling `verify`
+    /// on a username that is already verified. Returns `(cpu_instructions, memory_bytes)`.
+    ///
+    /// The operation registers a user, verifies them, then calls verify again and
+    /// expects `AlreadyVerified`. The cost is compared against a successful first
+    /// verify to ensure the rejection path is strictly cheaper (denial-of-wallet
+    /// protection — a rejected call must not consume more budget than a successful one).
+    fn measure_double_verify_rejection() -> (u64, u64, u64, u64) {
+        let env = Env::default();
+        let contract_id = env.register(TrustBridgeContract, ());
+        let admin = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        // Initialize the contract
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // Register and verify first
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        // Measure cost of the second verify (should fail with AlreadyVerified)
+        env.cost_estimate().budget().reset_default();
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(result, Err(ContractError::AlreadyVerified));
+        });
+        let reject_budget = env.cost_estimate().budget();
+        let reject_cpu = reject_budget.cpu_instruction_cost();
+        let reject_mem = reject_budget.memory_bytes_cost();
+
+        // Measure cost of a successful verify (separate user, fresh env)
+        let env2 = Env::default();
+        let contract_id2 = env2.register(TrustBridgeContract, ());
+        let admin2 = Address::generate(&env2);
+        let user2 = Address::generate(&env2);
+
+        env2.as_contract(&contract_id2, || {
+            TrustBridgeContract::initialize(env2.clone(), admin2.clone()).unwrap();
+        });
+        env2.mock_all_auths();
+        env2.as_contract(&contract_id2, || {
+            TrustBridgeContract::register(
+                env2.clone(),
+                username(&env2, "octocat"),
+                user2.clone(),
+            )
+            .unwrap();
+        });
+
+        env2.cost_estimate().budget().reset_default();
+        env2.mock_all_auths();
+        env2.as_contract(&contract_id2, || {
+            TrustBridgeContract::verify(
+                env2.clone(),
+                admin2.clone(),
+                username(&env2, "octocat"),
+            )
+            .unwrap();
+        });
+        let success_budget = env2.cost_estimate().budget();
+        let success_cpu = success_budget.cpu_instruction_cost();
+        let success_mem = success_budget.memory_bytes_cost();
+
+        (reject_cpu, reject_mem, success_cpu, success_mem)
+    }
+
+    /// Benchmark double-verify rejection (Issue #58): ensures the rejected
+    /// verify (AlreadyVerified) costs strictly less than a successful verify.
+    ///
+    /// A rejection path that costs more than the success path could be used by
+    /// an attacker to burn the contract's ledger budget cheaply — the rejection
+    /// executes fewer steps, so it must cost strictly less.
+    #[test]
+    fn test_bench_double_verify_rejection() {
+        let (reject_cpu, reject_mem, success_cpu, success_mem) = measure_double_verify_rejection();
+
+        std::println!("operation,type,cpu_instructions,memory_bytes");
+        std::println!("verify,success,{},{}", success_cpu, success_mem);
+        std::println!("verify,rejected_double_verify,{},{}", reject_cpu, reject_mem);
+
+        assert!(
+            success_cpu > 0,
+            "successful verify CPU cost was not metered"
+        );
+        assert!(
+            reject_cpu > 0,
+            "rejected double-verify CPU cost was not metered"
+        );
+
+        // Protection against denial-of-wallet: a rejected path must cost
+        // strictly less than the equivalent success path (Issue #58).
+        assert!(
+            reject_cpu < success_cpu,
+            "rejected double-verify CPU cost ({reject_cpu}) must be strictly less than successful verify CPU cost ({success_cpu})"
+        );
+        assert!(
+            reject_mem <= success_mem,
+            "rejected double-verify memory cost ({reject_mem}) must not exceed successful verify memory cost ({success_mem})"
+        );
     }
 
     /// Revoking Verifier role prevents further verify calls (Issue #12).
