@@ -112,25 +112,6 @@ mod test {
         assert_eq!(stats.verified, 0, "Verified count must be zero after initialize");
 
         let events = env.events().all();
-        for (_, topics, _) in events.into_iter() {
-            if topics.len() > 0 {
-                let topic_name = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
-                assert_ne!(
-                    topic_name,
-                    Symbol::new(&env, "RegisteredEvent"),
-                    "RegisteredEvent should not be emitted on initialization"
-                );
-                assert_ne!(
-                    topic_name,
-                    Symbol::new(&env, "VerifiedEvent"),
-                    "VerifiedEvent should not be emitted on initialization"
-                );
-                assert_ne!(
-                    topic_name,
-                    Symbol::new(&env, "VerificationRevokedEvent"),
-                    "VerificationRevokedEvent should not be emitted on initialization"
-                );
-            }
-        }
+        assert!(events.events().is_empty(), "No events expected after initialize");
     }
 }

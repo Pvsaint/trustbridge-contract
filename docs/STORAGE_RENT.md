@@ -89,7 +89,7 @@ A single `ContributorRecord` serializes to roughly:
 | Field | Approximate XDR size |
 |-------|---------------------|
 | `stellar_address` (G-address) | ~36 bytes |
-| `registered_at` (`u64`) | 8 bytes |
+| `registered_at` (`u32`) | 4 bytes — downsized from u64 to save 4 bytes/record |
 | `verified` (`bool`) | 1 byte |
 | XDR framing overhead | ~20 bytes |
 | **Total** | **~65 bytes** |

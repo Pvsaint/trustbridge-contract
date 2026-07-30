@@ -64,7 +64,7 @@ methods (no dedicated on-chain `health` entrypoint). See
 ```rust
 pub struct ContributorRecord {
     pub stellar_address: Address,
-    pub registered_at: u64,   // ledger timestamp at registration/update
+    pub registered_at: u32,   // ledger timestamp (u32 saves 4 bytes/record)
     pub verified: bool,       // set by admin after off-chain GitHub check
 }
 ```
