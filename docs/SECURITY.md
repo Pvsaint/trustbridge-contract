@@ -61,22 +61,33 @@ Recommendations:
 - Never commit private keys or seed phrases
 - Rotate operational keys via deploying a new contract instance if admin is compromised (no on-chain admin transfer in v0.1)
 
-### Mainnet verification-revoke incidents
+## Pause Semantics During Active Waves
 
-When a verified mapping is compromised or otherwise must not be trusted,
-**prefer `revoke_verification` over `remove`**. Revoke clears the verified flag
-and emits `VerificationRevokedEvent` without deleting the registration.
+When pause mode is active, guarded entry points fail with
+`ContractError::Paused` (code `7`). This avoids partial-wave behavior where
+some state writes continue while others are frozen.
 
-Full operator sequence (detect → verify → revoke → notify → audit export), CLI
-examples, error handling, and comms templates live in
-[ADMIN_RUNBOOK.md — Mainnet incident: emergency verification revoke](ADMIN_RUNBOOK.md#mainnet-incident-emergency-verification-revoke).
+Paused function matrix:
 
-Auth reminder (see also [ABI.md](ABI.md)):
+| Function | Behavior while paused |
+|---------|------------------------|
+| `register` | Rejected with `Paused` |
+| `remove` | Rejected with `Paused` |
+| `verify` | Rejected with `Paused` |
+| `revoke_verification` | Rejected with `Paused` |
+| `upgrade` | Rejected with `Paused` |
+| `migrate` | Rejected with `Paused` |
+| `set_role` / `remove_role` | Rejected with `Paused` |
+| `get_public_paginated` | Rejected with `Paused` |
 
-- `caller` must `require_auth()` and be the contract admin **or** hold
-  `Role::Verifier`
-- Contract must be initialized and not paused
-- Do not use `remove` when revoke is sufficient for the incident
+Allowed while paused:
+
+| Function | Behavior while paused |
+|---------|------------------------|
+| `get_address`, `has_record`, `get_stats` | Allowed read-only lookups |
+| `get_all_registered`, `get_registered_page`, `get_registered_paginated` | Allowed for admin/export workflows |
+| `is_paused`, `is_contract_paused`, `version`, `is_compatible` | Allowed status and compatibility reads |
+| `pause`, `unpause`, `set_paused` | Allowed admin controls for freeze lifecycle |
 
 ---
 

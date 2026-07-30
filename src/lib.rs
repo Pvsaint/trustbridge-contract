@@ -2778,6 +2778,51 @@ mod test {
         });
     }
 
+    #[test]
+    fn test_pause_blocks_remove_and_public_paginated_then_unpause_restores() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let name = username(&env, "octocat");
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), name.clone(), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let remove_res = TrustBridgeContract::remove(env.clone(), user.clone(), name.clone());
+            assert_eq!(remove_res, Err(ContractError::Paused));
+        });
+
+        env.as_contract(&contract_id, || {
+            let paged_res = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10);
+            assert_eq!(paged_res, Err(ContractError::Paused));
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::unpause(env.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let paged = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(paged.records.len(), 1);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), user.clone(), name.clone()).unwrap();
+            assert!(TrustBridgeContract::get_address(env.clone(), name.clone()).is_none());
+        });
+    }
+
     // ── Roles management ─────────────────────────────────────────────────────
 
     #[test]
