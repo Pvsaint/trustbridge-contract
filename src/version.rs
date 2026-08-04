@@ -66,7 +66,7 @@ impl Version {
     }
 
     /// Whether this version's public read functions are safe to call
-    /// cross-contract. See [`CROSS_CONTRACT_READ_MIN_VERSION`].
+    /// cross-contract. See `CROSS_CONTRACT_READ_MIN_VERSION`.
     #[must_use]
     pub fn supports_cross_contract_reads(&self) -> bool {
         self.is_compatible_with(CROSS_CONTRACT_READ_MIN_VERSION)

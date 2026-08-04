@@ -153,7 +153,7 @@ impl TrustBridgeContract {
 
     /// Resumes state-mutating contract functions after a pause. Admin-only.
     ///
-    /// Clears the paused flag set by [`pause`][Self::pause], restoring normal contract operation.
+    /// Clears the paused flag set by `pause`, restoring normal contract operation.
     ///
     /// Emits [`UnpausedEvent`].
     ///
@@ -306,7 +306,7 @@ impl TrustBridgeContract {
     /// Returns the stored contract schema version as `(major, minor, patch)`.
     ///
     /// Falls back to the compile-time [`CONTRACT_VERSION`] constant on instances
-    /// initialized before on-chain version tracking was added. Prefer [`version`][Self::version]
+    /// initialized before on-chain version tracking was added. Prefer `version`
     /// for the canonical version endpoint; this is the raw storage accessor.
     #[must_use]
     pub fn get_version(env: Env) -> (u32, u32, u32) {
@@ -535,7 +535,7 @@ impl TrustBridgeContract {
     /// One-time configuration of the verification parameters.
     ///
     /// Stores the attestation symbol, expiry window, and threshold. May only
-    /// be called once — a second invocation returns [`AlreadyInitialized`].
+    /// be called once — a second invocation returns [`ContractError::AlreadyInitialized`].
     ///
     /// # Auth
     ///
@@ -786,7 +786,7 @@ impl TrustBridgeContract {
     /// Removes multiple registrations in a single invocation, collecting
     /// per-entry errors rather than aborting on the first failure.
     ///
-    /// This is the batched form of [`remove`][Self::remove], intended for
+    /// This is the batched form of `remove`, intended for
     /// admin workflows that need to clean up many stale or disputed
     /// registrations efficiently. Doing that as N separate invocations costs
     /// N transactions, N signatures, and N rounds of ledger overhead — this
@@ -803,7 +803,7 @@ impl TrustBridgeContract {
     ///
     /// # Auth
     ///
-    /// Requires auth from the contract admin. Unlike [`remove`][Self::remove],
+    /// Requires auth from the contract admin. Unlike `remove`,
     /// which also allows the registrant to self-remove, this batch variant
     /// requires admin auth — a registrant who wants to remove only their own
     /// record should call the single-entry version.
@@ -1221,7 +1221,7 @@ impl TrustBridgeContract {
 
     /// Returns whether the contract is currently paused.
     ///
-    /// Alias of [`is_paused`][Self::is_paused] kept for the reference event indexer,
+    /// Alias of `is_paused` kept for the reference event indexer,
     /// which calls this name. Read-only; no auth required.
     #[must_use]
     pub fn is_contract_paused(env: Env) -> bool {

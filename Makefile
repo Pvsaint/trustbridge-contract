@@ -4,8 +4,9 @@
 # Requires: Rust (≥ 1.84), wasm target, Stellar CLI (≥ 26.x recommended).
 
 CRATE       := trustbridge-contract
-WASM_V1     := target/wasm32v1-none/release/$(CRATE).wasm
-WASM_LEGACY := target/wasm32-unknown-unknown/release/$(CRATE).wasm
+WASM_CRATE  := $(subst -,_,$(CRATE))
+WASM_V1     := target/wasm32v1-none/release/$(WASM_CRATE).wasm
+WASM_LEGACY := target/wasm32-unknown-unknown/release/$(WASM_CRATE).wasm
 STELLAR     ?= stellar
 SOURCE      ?= default
 NETWORK     ?= testnet
@@ -22,6 +23,7 @@ BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
+WASM_SIZE_LIMIT ?= 204800
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
@@ -95,8 +97,6 @@ docs: ## Build rustdoc for public API (opens in browser)
 docs-check: ## Build rustdoc without opening browser (CI-equivalent)
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
-check: fmt lint test build docs-check ## Run full local quality gate
-
 wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE_LIMIT)
 	@if [ -f $(WASM_V1) ]; then \
 		WASM=$(WASM_V1); \
@@ -127,7 +127,7 @@ wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE
 		echo "PASS: WASM size is within budget."; \
 	fi
 
-check: fmt lint test build wasm-size ## Run full local quality gate
+check: fmt lint test build docs-check wasm-size ## Run full local quality gate
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
@@ -151,7 +151,7 @@ wasm-hash-update: build ## Recompute and update wasm-hash.pin with the current b
 	sed -i "s/^[a-f0-9]\{64\}$$/$$HASH/" wasm-hash.pin; \
 	echo "Updated wasm-hash.pin to $$HASH"
 
-ci: check ## Alias for CI-equivalent checks (fmt + lint + test + build + wasm-size)
+ci: check ## Alias for CI-equivalent checks (fmt + lint + test + build + docs + wasm-size)
 
 clean: ## Remove build artifacts
 	cargo clean
