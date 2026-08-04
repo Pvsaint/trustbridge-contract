@@ -40,6 +40,12 @@ jobs:
       - name: Install wasm targets
         run: rustup target add wasm32v1-none wasm32-unknown-unknown
 
+      # stellar-cli depends on libdbus-sys (keyring); needs dbus headers + pkg-config
+      - name: Install system deps for Stellar CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli@26.1.0
 
