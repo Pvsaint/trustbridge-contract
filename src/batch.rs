@@ -26,6 +26,7 @@ pub struct BatchOperationResult {
 
 impl BatchOperationResult {
     /// Create a successful result.
+    #[must_use]
     pub fn success(id: String) -> Self {
         BatchOperationResult {
             success: true,
@@ -35,6 +36,7 @@ impl BatchOperationResult {
     }
 
     /// Create a failed result with error message.
+    #[must_use]
     pub fn failed(id: String, error: String) -> Self {
         BatchOperationResult {
             success: false,
@@ -56,6 +58,7 @@ pub struct BatchSummary {
 
 impl BatchSummary {
     /// Calculate summary from count.
+    #[must_use]
     pub fn new(total: u32, successful: u32) -> Self {
         let failed = total.saturating_sub(successful);
         let success_rate = if total > 0 {
@@ -73,11 +76,13 @@ impl BatchSummary {
     }
 
     /// Check if all operations succeeded.
+    #[must_use]
     pub fn all_successful(&self) -> bool {
         self.failed == 0
     }
 
     /// Check if at least some operations succeeded.
+    #[must_use]
     pub fn any_successful(&self) -> bool {
         self.successful > 0
     }
@@ -92,16 +97,18 @@ pub struct BatchConfig {
     pub max_total_items: u32,
 }
 
-impl BatchConfig {
-    /// Create default batch configuration (safe limits).
-    pub fn default() -> Self {
+impl Default for BatchConfig {
+    fn default() -> Self {
         BatchConfig {
             max_batch_size: 100,
             max_total_items: 10000,
         }
     }
+}
 
+impl BatchConfig {
     /// Validate that a batch size is acceptable.
+    #[must_use]
     pub fn is_valid_batch_size(&self, size: u32) -> bool {
         size > 0 && size <= self.max_batch_size
     }

@@ -62,6 +62,7 @@ pub enum ContractError {
 }
 
 impl ContractError {
+    #[must_use]
     pub fn code(self) -> u32 {
         self as u32
     }
@@ -70,6 +71,7 @@ impl ContractError {
     /// invocation's XDR result by a dashboard or indexer) back to the typed
     /// variant. Returns `None` for codes that don't correspond to a variant,
     /// so callers don't need to keep their own copy of this table in sync.
+    #[must_use]
     pub fn from_code(code: u32) -> Option<ContractError> {
         match code {
             1 => Some(ContractError::AlreadyInitialized),

@@ -94,9 +94,11 @@ pub struct RoleRevokedEvent {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use crate::{TrustBridgeContract, TrustBridgeContractClient};
-    use soroban_sdk::{testutils::{Address as _, Events}, Address, Env, Symbol};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        Address, Env,
+    };
 
     #[test]
     fn test_zero_stats_after_initialize() {
@@ -109,9 +111,15 @@ mod test {
 
         let stats = client.get_stats();
         assert_eq!(stats.total, 0, "Total count must be zero after initialize");
-        assert_eq!(stats.verified, 0, "Verified count must be zero after initialize");
+        assert_eq!(
+            stats.verified, 0,
+            "Verified count must be zero after initialize"
+        );
 
         let events = env.events().all();
-        assert!(events.events().is_empty(), "No events expected after initialize");
+        assert!(
+            events.events().is_empty(),
+            "No events expected after initialize"
+        );
     }
 }

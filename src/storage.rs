@@ -25,7 +25,9 @@ pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 // Pending reverify flag per username
 pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
 // Emergency pause flag and timestamp
+#[allow(dead_code)]
 pub const EMERGENCY_PAUSE_KEY: Symbol = symbol_short!("emrg_ps");
+#[allow(dead_code)]
 pub const EMERGENCY_PAUSE_TS_KEY: Symbol = symbol_short!("emerg_ts");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
@@ -497,24 +499,36 @@ pub fn get_cooldown(env: &Env) -> u64 {
     env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
 }
 
+#[allow(dead_code)]
 pub fn get_emergency_pause(env: &Env) -> bool {
-    env.storage().instance().get(&EMERGENCY_PAUSE_KEY).unwrap_or(false)
+    env.storage()
+        .instance()
+        .get(&EMERGENCY_PAUSE_KEY)
+        .unwrap_or(false)
 }
 
+#[allow(dead_code)]
 pub fn set_emergency_pause(env: &Env, flag: bool) {
     env.storage().instance().set(&EMERGENCY_PAUSE_KEY, &flag);
 }
 
+#[allow(dead_code)]
 pub fn get_emergency_pause_ts(env: &Env) -> u64 {
-    env.storage().instance().get(&EMERGENCY_PAUSE_TS_KEY).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&EMERGENCY_PAUSE_TS_KEY)
+        .unwrap_or(0)
 }
 
+#[allow(dead_code)]
 pub fn set_emergency_pause_ts(env: &Env, ts: u64) {
     env.storage().instance().set(&EMERGENCY_PAUSE_TS_KEY, &ts);
 }
 
 pub fn set_cooldown(env: &Env, cooldown_seconds: u64) {
-    env.storage().instance().set(&COOLDOWN_KEY, &cooldown_seconds);
+    env.storage()
+        .instance()
+        .set(&COOLDOWN_KEY, &cooldown_seconds);
 }
 
 /// Returns `true` if the contract's pause flag is set.
@@ -536,6 +550,7 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&PAUSED_KEY, &paused);
 }
 
+#[allow(dead_code)]
 pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
     let key = (PENDING_REVERIFY_KEY, github_username.clone());
     env.storage().persistent().get(&key).unwrap_or(false)
@@ -678,13 +693,6 @@ pub fn is_verification_configured(env: &Env) -> bool {
 
 /// Stores the verification configuration. Idempotent — caller must gate
 /// on [`is_verification_configured`] first.
-pub fn set_verification_config(
-    env: &Env,
-    _attestation: Symbol,
-    _expires_in: u64,
-    _threshold: u32,
-) {
+pub fn set_verification_config(env: &Env, _attestation: Symbol, _expires_in: u64, _threshold: u32) {
     env.storage().instance().set(&VER_CFG_KEY, &true);
 }
-
-

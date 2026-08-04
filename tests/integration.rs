@@ -197,8 +197,13 @@ fn test_integration_verifier_role_separation() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "octocat"), 1)
-            .unwrap();
+        TrustBridgeContract::revoke_verification(
+            env.clone(),
+            verifier.clone(),
+            s(&env, "octocat"),
+            1,
+        )
+        .unwrap();
     });
     env.as_contract(&contract_id, || {
         assert!(
@@ -310,7 +315,12 @@ fn test_integration_not_initialized_guards() {
             "verify before init"
         );
         assert_eq!(
-            TrustBridgeContract::revoke_verification(env.clone(), addr.clone(), s(&env, "alice"), 1),
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                addr.clone(),
+                s(&env, "alice"),
+                1
+            ),
             Err(ContractError::NotInitialized),
             "revoke_verification before init"
         );
@@ -754,8 +764,13 @@ fn test_integration_revoked_verifier_cannot_verify() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "alice"), 1)
-            .unwrap();
+        TrustBridgeContract::revoke_verification(
+            env.clone(),
+            verifier.clone(),
+            s(&env, "alice"),
+            1,
+        )
+        .unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -911,8 +926,12 @@ fn test_integration_vcount_never_underflows() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let result =
-            TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "alice"), 1);
+        let result = TrustBridgeContract::revoke_verification(
+            env.clone(),
+            admin.clone(),
+            s(&env, "alice"),
+            1,
+        );
         assert_eq!(result, Err(ContractError::NotVerified));
         assert_eq!(
             TrustBridgeContract::get_verified_count(env.clone()),
@@ -1004,15 +1023,15 @@ fn test_integration_middle_user_removal_index_compaction() {
             v
         };
         assert!(
-            names.contains(&s(&env, "alice")),
+            names.contains(s(&env, "alice")),
             "export must include alice"
         );
         assert!(
-            names.contains(&s(&env, "carol")),
+            names.contains(s(&env, "carol")),
             "export must include carol"
         );
         assert!(
-            !names.contains(&s(&env, "bob")),
+            !names.contains(s(&env, "bob")),
             "export must not include removed bob"
         );
 
@@ -1148,8 +1167,12 @@ fn test_integration_revoke_verification_not_registered_fails() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let result =
-            TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "ghost"), 1);
+        let result = TrustBridgeContract::revoke_verification(
+            env.clone(),
+            admin.clone(),
+            s(&env, "ghost"),
+            1,
+        );
         assert_eq!(result, Err(ContractError::NotRegistered));
     });
 }

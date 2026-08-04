@@ -47,6 +47,7 @@ pub const CROSS_CONTRACT_READ_MIN_VERSION: Version = Version::new(1, 0, 0);
 
 impl Version {
     /// Create a new version.
+    #[must_use]
     pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
         Version {
             major,
@@ -59,17 +60,20 @@ impl Version {
     ///
     /// Lets a caller branch between one batched invocation and N individual
     /// `verify` calls without probing the contract and interpreting a failure.
+    #[must_use]
     pub fn supports_batch_verify(&self) -> bool {
         self.is_compatible_with(BATCH_VERIFY_MIN_VERSION)
     }
 
     /// Whether this version's public read functions are safe to call
     /// cross-contract. See [`CROSS_CONTRACT_READ_MIN_VERSION`].
+    #[must_use]
     pub fn supports_cross_contract_reads(&self) -> bool {
         self.is_compatible_with(CROSS_CONTRACT_READ_MIN_VERSION)
     }
 
     /// Parse a version from a tuple (used for storage).
+    #[must_use]
     pub fn from_tuple(tuple: (u32, u32, u32)) -> Self {
         Version {
             major: tuple.0,
@@ -79,16 +83,19 @@ impl Version {
     }
 
     /// Convert version to a tuple for storage.
+    #[must_use]
     pub fn to_tuple(&self) -> (u32, u32, u32) {
         (self.major, self.minor, self.patch)
     }
 
     /// Create version 1.0.0 (initial release).
+    #[must_use]
     pub fn v1_0_0() -> Self {
         Version::new(1, 0, 0)
     }
 
     /// Check if this version is compatible with a minimum required version.
+    #[must_use]
     pub fn is_compatible_with(&self, minimum: Version) -> bool {
         // Same major version, minor and patch must be >= minimum
         if self.major != minimum.major {
@@ -101,21 +108,25 @@ impl Version {
     }
 
     /// Check if a migration is needed from old version to new version.
+    #[must_use]
     pub fn needs_migration(&self, target: Version) -> bool {
         self != &target && self.major <= target.major
     }
 
     /// Get the next patch version (for hot fixes).
+    #[must_use]
     pub fn bump_patch(&self) -> Version {
         Version::new(self.major, self.minor, self.patch + 1)
     }
 
     /// Get the next minor version (for features).
+    #[must_use]
     pub fn bump_minor(&self) -> Version {
         Version::new(self.major, self.minor + 1, 0)
     }
 
     /// Get the next major version (for breaking changes).
+    #[must_use]
     pub fn bump_major(&self) -> Version {
         Version::new(self.major + 1, 0, 0)
     }

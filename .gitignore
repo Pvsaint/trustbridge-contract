@@ -37,3 +37,8 @@ Thumbs.db
 
 # Stellar CLI local config (machine-specific)
 .stellar/
+
+# Local-only issue push helper (keep for next wave; do not commit)
+push_issues.sh
+issues.md
+issues.d/

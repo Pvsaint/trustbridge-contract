@@ -67,7 +67,7 @@ pub fn is_empty_or_whitespace(s: &String) -> bool {
     }
     let mut buf = [0u8; USERNAME_BUF];
     s.copy_into_slice(&mut buf[..len]);
-    buf[..len].iter().all(|b| b.is_ascii_whitespace())
+    buf[..len].iter().all(u8::is_ascii_whitespace)
 }
 
 /// Validate that a GitHub username follows GitHub's own rules.
@@ -427,10 +427,7 @@ mod tests {
         let env = Env::default();
         // Entirely Cyrillic
         assert!(
-            !is_valid_github_username(&s(
-                &env,
-                "\u{0430}\u{043b}\u{0438}\u{0441}\u{0430}"
-            )),
+            !is_valid_github_username(&s(&env, "\u{0430}\u{043b}\u{0438}\u{0441}\u{0430}")),
             "all-Cyrillic username must be rejected"
         );
         // Entirely CJK

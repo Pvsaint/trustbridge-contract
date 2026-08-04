@@ -10,6 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 
 /// Read-only username lookup result.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryLookup {
     pub github_username: String,
@@ -18,11 +19,13 @@ pub struct RegistryLookup {
 }
 
 /// Read-only registry lookup interface.
+#[allow(dead_code)]
 pub trait RegistryReadStub {
     fn lookup(&self, github_username: &str) -> RegistryLookup;
 }
 
 /// Deterministic fixture used by tests and docs.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FixtureRegistryReadStub;
 
@@ -31,12 +34,16 @@ impl RegistryReadStub for FixtureRegistryReadStub {
         match github_username {
             "legacy-alice" => RegistryLookup {
                 github_username: String::from("legacy-alice"),
-                stellar_address: Some(String::from("GCFIXTUREALICE0000000000000000000000000000000000000000")),
+                stellar_address: Some(String::from(
+                    "GCFIXTUREALICE0000000000000000000000000000000000000000",
+                )),
                 source_registry_id: String::from("legacy-registry"),
             },
             "legacy-bob" => RegistryLookup {
                 github_username: String::from("legacy-bob"),
-                stellar_address: Some(String::from("GCFIXTUREBOB000000000000000000000000000000000000000000")),
+                stellar_address: Some(String::from(
+                    "GCFIXTUREBOB000000000000000000000000000000000000000000",
+                )),
                 source_registry_id: String::from("legacy-registry"),
             },
             _ => RegistryLookup {
