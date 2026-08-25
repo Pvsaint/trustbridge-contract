@@ -472,12 +472,19 @@ Boundary tests: `test_paginated_export_at_max_page_limit`,
 
 ---
 
-### `verify(caller: Address, github_username: String) -> Result<(), ContractError>`
+### `config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>`
 
-*Note: Triggers `AlreadyInitialized` if executed after the initial verification configuration is stored.*
+Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `AlreadyInitialized` |
+
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- config_verification --caller G... --attestation github_att --expiry 3600 --quorum 2
+  -- config_verification --caller G... --attestation github_att --expires-in 3600 --threshold 2
 ```
 
 ---
@@ -570,7 +577,7 @@ stellar contract invoke --id $ID --source admin --network testnet --send=yes \
 
 ---
 
-### `batch_verify(usernames: Vec<String>) -> Result<BatchSummary, ContractError>`
+### `batch_verify(caller: Address, usernames: Vec<String>) -> Result<BatchSummary, ContractError>`
 
 Verify many contributors in a single invocation — the batched form of `verify`,
 for the dashboard-sync workflow where an off-chain job confirms a page of GitHub
@@ -579,9 +586,9 @@ N signatures and N rounds of ledger overhead; this is one.
 
 | | |
 |---|---|
-| **Auth** | Admin |
+| **Auth** | Admin **or** any address assigned `Role::Verifier` |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `InvalidBatchSize` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidBatchSize`, `NotAuthorized` |
 | **Events** | One `VerifiedEvent` per newly verified contributor |
 | **Since** | 1.1.0 — gate on `Version::supports_batch_verify` |
 
@@ -601,13 +608,11 @@ entries need attention, **not** that the batch failed. The errors listed above
 are the only conditions that abort the whole call, and all of them invalidate
 every entry rather than a single one.
 
-`verified` is incremented once for the whole batch rather than per entry —
-nothing between the per-entry writes can observe an intermediate value within a
-single invocation.
+`verified` is incremented per newly verified item, and `vcount` stays consistent with successful items.
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- batch_verify --usernames '["octocat","alice","bob-smith"]'
+  -- batch_verify --caller G... --usernames '["octocat","alice","bob-smith"]'
 ```
 
 ---

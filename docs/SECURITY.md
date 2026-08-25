@@ -101,13 +101,14 @@ Allowed while paused:
   the verified count decreases, and any later `verify()` applies to the new
   address only.
 
-### Future registration cooldown proposal
+### Registration cooldown enforcement
 
-A registration cooldown is a planned design proposal for a future contract version. It is not part of the current contract behavior.
+The contract enforces per-username action rate-limiting during `register()`:
 
-- Cooldown reduces rapid registration spam by rejecting repeated `register()` calls for the same username within a ledger timestamp window.
-- It also reduces username squatting churn by making repeated remove/re-register cycles more expensive.
-- No current contract logic or storage behavior changes are introduced by this proposal; it is documented here as a design consideration only.
+- When `cooldown` is non-zero, `register()` checks whether `is_in_cooldown()` is true for `github_username`.
+- If the configured cooldown window has not elapsed since the username's last mutating action, `register()` fails with `CooldownActive` (code 8).
+- Upon a successful `register()`, the username's last action timestamp is updated via `set_last_action()`.
+- First-time registrations have no recorded prior action timestamp (0), allowing initial registration to succeed immediately.
 
 ---
 
@@ -558,6 +559,23 @@ Do not construct CLI examples that imply a registrant can self-verify. The contr
 
 ---
 
+## On-Chain Audit Logging
+
+The contract records structured audit log entries into contract storage upon state mutations (`initialize`, `register`, `remove`, `verify`, `batch_verify`, `pause`, `unpause`, `config_verification`, `set_role`).
+
+### What IS an On-Chain Audit Log
+
+- **Structured compliance record**: An on-chain log entry (`AuditLogEntry`) persisted in instance storage recording event type (`AuditEventType`), timestamp, actor address, target username/address, and details.
+- **Operator query surface**: Callable on-chain via `get_audit_logs()` and `get_audit_stats()`.
+- **Bounded ring buffer**: Maintained up to a maximum cap (100 entries) per contract instance to stay within Soroban memory and footprint boundaries.
+
+### What IS NOT an On-Chain Audit Log
+
+- **Domain events replacement**: Audit log entries complement, but do not replace, Soroban domain events (`RegisteredEvent`, `VerifiedEvent`, `RemovedEvent`, etc.). Off-chain indexers still rely on domain events for event stream monitoring.
+- **Unbounded historical store**: Audit entries are capped on-chain. Complete long-term history across all ledgers should be collected by off-chain indexers from event topics or block archives.
+
+---
+
 ## Audit Status
 
 This contract has **not** been formally audited. Use at your own risk on mainnet until an audit is completed.
@@ -567,3 +585,4 @@ For production deployments, consider:
 - Independent security audit
 - Bug bounty program
 - Staged rollout on testnet/futurenet first
+

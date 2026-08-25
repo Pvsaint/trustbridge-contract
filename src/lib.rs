@@ -19,30 +19,34 @@ mod storage;
 mod utils;
 mod version;
 
+pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
 pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
 pub use error::ContractError;
 pub use events::{
     PausedEvent, RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
-pub use storage::{ContributorRecord, ExportPage, Role, Stats, WasmAttestation, WasmProvenance};
+pub use storage::{
+    ContributorRecord, ExportPage, Role, Stats, VerificationConfig, WasmAttestation, WasmProvenance,
+};
 pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::storage::{
-    add_to_index, clear_pending_reverify, get_admin, get_cooldown as storage_get_cooldown,
-    get_count, get_index, get_last_upgrade, get_record, get_registered_paginated_internal,
-    get_role as storage_get_role, get_stats as read_stats,
-    get_verified_count as storage_get_verified_count, get_version as storage_get_version,
-    get_wasm_attestation, get_wasm_provenance, has_record, is_admin_caller, is_in_cooldown,
-    is_paused as storage_is_paused, remove_from_index, remove_record,
-    remove_role as storage_remove_role, remove_wasm_attestation, require_initialized,
-    require_not_paused, set_cooldown as storage_set_cooldown, set_count, set_last_action,
-    set_last_upgrade, set_paused as set_paused_state, set_pending_reverify, set_record,
-    set_role as storage_set_role, set_verified_count, set_version, set_wasm_attestation,
-    set_wasm_provenance, ADMIN_KEY,
+    add_to_index, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
+    get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade, get_record,
+    get_registered_paginated_internal, get_role as storage_get_role, get_stats as read_stats,
+    get_verification_config, get_verified_count as storage_get_verified_count,
+    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_record,
+    is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
+    remove_from_index, remove_record, remove_role as storage_remove_role, remove_wasm_attestation,
+    require_initialized, require_not_paused, set_cooldown as storage_set_cooldown, set_count,
+    set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
+    set_record, set_role as storage_set_role, set_verified_count, set_version,
+    set_wasm_attestation, set_wasm_provenance, ADMIN_KEY,
 };
+
 use crate::utils::{
     eq_ignore_ascii_case, is_valid_github_username, is_zero_address, MAX_USERNAME_LEN,
 };
@@ -117,6 +121,12 @@ impl TrustBridgeContract {
         set_version(&env, (1, 0, 0));
         storage_set_role(&env, &admin, &Role::Admin);
 
+        let timestamp = env.ledger().timestamp();
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::ContractInitialized, timestamp, Some(admin)),
+        );
+
         Ok(())
     }
 
@@ -147,7 +157,17 @@ impl TrustBridgeContract {
 
         set_paused_state(&env, true);
         let timestamp = env.ledger().timestamp();
-        PausedEvent { admin, timestamp }.publish(&env);
+        PausedEvent {
+            admin: admin.clone(),
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(admin)),
+        );
+
         Ok(())
     }
 
@@ -172,7 +192,17 @@ impl TrustBridgeContract {
 
         set_paused_state(&env, false);
         let timestamp = env.ledger().timestamp();
-        UnpausedEvent { admin, timestamp }.publish(&env);
+        UnpausedEvent {
+            admin: admin.clone(),
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(admin)),
+        );
+
         Ok(())
     }
 
@@ -569,7 +599,32 @@ impl TrustBridgeContract {
         }
 
         crate::storage::set_verification_config(&env, attestation, expires_in, threshold);
+
+        let timestamp = env.ledger().timestamp();
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(caller)),
+        );
+
         Ok(())
+    }
+
+    /// Returns the stored verification configuration, or `None` if not configured.
+    #[must_use]
+    pub fn get_verification_config(env: Env) -> Option<VerificationConfig> {
+        get_verification_config(&env)
+    }
+
+    /// Returns stored audit log entries for operator compliance and inspection.
+    #[must_use]
+    pub fn get_audit_logs(env: Env) -> Vec<AuditLogEntry> {
+        get_audit_logs(&env)
+    }
+
+    /// Returns stored aggregate audit log statistics.
+    #[must_use]
+    pub fn get_audit_stats(env: Env) -> AuditStats {
+        get_audit_stats(&env)
     }
 
     /// Advances the on-chain schema version. Admin-only.
@@ -709,6 +764,10 @@ impl TrustBridgeContract {
             }
         }
 
+        if is_in_cooldown(&env, &github_username) {
+            return Err(ContractError::CooldownActive);
+        }
+
         let record = ContributorRecord {
             stellar_address: stellar_address.clone(),
             registered_at: timestamp as u32,
@@ -730,13 +789,25 @@ impl TrustBridgeContract {
         }
 
         set_record(&env, &github_username, &record);
+        set_last_action(&env, &github_username, timestamp);
 
         RegisteredEvent {
             github_username: github_username.clone(),
-            stellar_address,
+            stellar_address: stellar_address.clone(),
             timestamp,
         }
         .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::UserRegistered,
+                timestamp,
+                Some(stellar_address.clone()),
+            )
+            .with_username(github_username)
+            .with_address(stellar_address),
+        );
 
         Ok(())
     }
@@ -869,10 +940,17 @@ impl TrustBridgeContract {
 
             RemovedEvent {
                 github_username: username.clone(),
-                stellar_address,
+                stellar_address: stellar_address.clone(),
                 timestamp,
             }
             .publish(&env);
+
+            push_audit_entry(
+                &env,
+                AuditLogEntry::new(AuditEventType::UserRemoved, timestamp, Some(caller.clone()))
+                    .with_username(username.clone())
+                    .with_address(stellar_address),
+            );
 
             successful = successful.saturating_add(1);
         }
@@ -944,10 +1022,17 @@ impl TrustBridgeContract {
 
         RemovedEvent {
             github_username: github_username.clone(),
-            stellar_address,
+            stellar_address: stellar_address.clone(),
             timestamp,
         }
         .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::UserRemoved, timestamp, Some(caller))
+                .with_username(github_username)
+                .with_address(stellar_address),
+        );
 
         Ok(())
     }
@@ -1138,7 +1223,93 @@ impl TrustBridgeContract {
         }
         .publish(&env);
 
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::UserVerified, timestamp, Some(caller))
+                .with_username(github_username)
+                .with_address(record.stellar_address),
+        );
+
         Ok(())
+    }
+
+    /// Verifies multiple registered contributors in a single invocation.
+    ///
+    /// Callable by the contract admin **or** any address assigned the
+    /// `Role::Verifier` role.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller` (admin or verifier).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::InvalidBatchSize`] if `usernames` is empty or exceeds the maximum batch size.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not an admin or verifier.
+    pub fn batch_verify(
+        env: Env,
+        caller: Address,
+        usernames: Vec<String>,
+    ) -> Result<BatchSummary, ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let config = BatchConfig::default();
+        if !config.is_valid_batch_size(usernames.len()) {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        caller.require_auth();
+
+        let is_admin = is_admin_caller(&env, &caller);
+        let is_verifier = storage_get_role(&env, &caller) == Some(Role::Verifier);
+        if !is_admin && !is_verifier {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let total = usernames.len();
+        let mut successful: u32 = 0;
+        let timestamp = env.ledger().timestamp();
+
+        for username in usernames.iter() {
+            let mut record = match get_record(&env, &username) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            if record.verified {
+                continue;
+            }
+
+            record.verified = true;
+            set_record(&env, &username, &record);
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
+            clear_pending_reverify(&env, &username);
+
+            VerifiedEvent {
+                github_username: username.clone(),
+                stellar_address: record.stellar_address.clone(),
+                timestamp,
+            }
+            .publish(&env);
+
+            push_audit_entry(
+                &env,
+                AuditLogEntry::new(
+                    AuditEventType::UserVerified,
+                    timestamp,
+                    Some(caller.clone()),
+                )
+                .with_username(username.clone())
+                .with_address(record.stellar_address),
+            );
+
+            successful = successful.saturating_add(1);
+        }
+
+        Ok(BatchSummary::new(total, successful))
     }
 
     /// Revokes verification for a registered contributor.
@@ -4957,6 +5128,270 @@ mod test {
                 ],
                 "VerificationRevokedEvent must include the supplied reason_code"
             );
+        });
+    }
+
+    // ── batch_verify tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_verify_happy_path() {
+        let env = Env::default();
+        let (admin, user1, user2, contract_id) = setup(&env);
+        let user3 = Address::generate(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "user1"), user1).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "user2"), user2).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "user3"), user3).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![
+                &env,
+                username(&env, "user1"),
+                username(&env, "user2"),
+                username(&env, "user3"),
+            ];
+            let summary =
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), usernames).unwrap();
+            assert_eq!(summary.total, 3);
+            assert_eq!(summary.successful, 3);
+            assert_eq!(summary.failed, 0);
+            assert_eq!(summary.success_rate, 100);
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 3);
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_partial_and_mixed() {
+        let env = Env::default();
+        let (admin, user1, _user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "user1"), user1.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user1"))
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // user1: already verified -> fail
+            // user2: not registered -> fail
+            let usernames =
+                soroban_sdk::vec![&env, username(&env, "user1"), username(&env, "user2"),];
+            let summary =
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), usernames).unwrap();
+            assert_eq!(summary.total, 2);
+            assert_eq!(summary.successful, 0);
+            assert_eq!(summary.failed, 2);
+            assert_eq!(summary.success_rate, 0);
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_verifier_role() {
+        let env = Env::default();
+        let (_admin, user1, verifier, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "user1"), user1).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![&env, username(&env, "user1")];
+            let summary =
+                TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), usernames)
+                    .unwrap();
+            assert_eq!(summary.successful, 1);
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_upgrader_rejected() {
+        let env = Env::default();
+        let (_admin, user1, upgrader, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), upgrader.clone(), Role::Upgrader).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "user1"), user1).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let usernames = soroban_sdk::vec![&env, username(&env, "user1")];
+            let res = TrustBridgeContract::batch_verify(env.clone(), upgrader.clone(), usernames);
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_empty_or_oversize() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let empty = soroban_sdk::vec![&env];
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), empty),
+                Err(ContractError::InvalidBatchSize)
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_paused() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone()).unwrap();
+            let usernames = soroban_sdk::vec![&env, username(&env, "user1")];
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), usernames),
+                Err(ContractError::Paused)
+            );
+        });
+    }
+
+    // ── Audit log & config_verification tests ────────────────────────────────
+
+    #[test]
+    fn test_audit_logs_persisted_and_retrieved() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user).unwrap();
+
+            let logs = TrustBridgeContract::get_audit_logs(env.clone());
+            assert!(!logs.is_empty());
+            assert_eq!(
+                logs.get(0).unwrap().event_type,
+                AuditEventType::ContractInitialized
+            );
+            assert_eq!(
+                logs.get(1).unwrap().event_type,
+                AuditEventType::UserRegistered
+            );
+
+            let stats = TrustBridgeContract::get_audit_stats(env.clone());
+            assert_eq!(stats.registrations, 1);
+        });
+    }
+
+    #[test]
+    fn test_unauthorized_caller_leaves_no_audit_row() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user).unwrap();
+        });
+
+        let initial_logs_len = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_audit_logs(env.clone()).len()
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let res =
+                TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+
+            let logs_len_after = TrustBridgeContract::get_audit_logs(env.clone()).len();
+            assert_eq!(initial_logs_len, logs_len_after);
+        });
+    }
+
+    #[test]
+    fn test_config_verification_persists_and_gets() {
+        let env = Env::default();
+        let (admin, _user, other, contract_id) = setup(&env);
+        let attestation = Symbol::new(&env, "github_att");
+
+        // Unauthorized caller fails
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let res = TrustBridgeContract::config_verification(
+                env.clone(),
+                other,
+                attestation.clone(),
+                3600,
+                2,
+            );
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+            assert_eq!(
+                TrustBridgeContract::get_verification_config(env.clone()),
+                None
+            );
+        });
+
+        // Admin caller succeeds
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::config_verification(
+                env.clone(),
+                admin,
+                attestation.clone(),
+                3600,
+                2,
+            )
+            .unwrap();
+
+            let cfg = TrustBridgeContract::get_verification_config(env.clone()).unwrap();
+            assert_eq!(cfg.attestation, attestation);
+            assert_eq!(cfg.expires_in, 3600);
+            assert_eq!(cfg.threshold, 2);
+        });
+    }
+
+    // ── Cooldown enforcement tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_register_cooldown_enforcement() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+
+        env.ledger().set_timestamp(1000);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // Set cooldown to 100 seconds
+            TrustBridgeContract::set_cooldown(env.clone(), 100).unwrap();
+
+            // First registration succeeds
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user1.clone())
+                .unwrap();
+
+            // Immediate re-registration fails with CooldownActive
+            let res = TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user2.clone(),
+            );
+            assert_eq!(res, Err(ContractError::CooldownActive));
+        });
+
+        // Advance ledger timestamp by 101 seconds
+        env.ledger().set_timestamp(1000 + 101);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // After cooldown elapses, re-registration succeeds
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user2.clone())
+                .unwrap();
         });
     }
 }
