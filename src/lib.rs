@@ -124,11 +124,7 @@ impl TrustBridgeContract {
         let timestamp = env.ledger().timestamp();
         push_audit_entry(
             &env,
-            AuditLogEntry::new(
-                AuditEventType::ContractInitialized,
-                timestamp,
-                Some(admin),
-            ),
+            AuditLogEntry::new(AuditEventType::ContractInitialized, timestamp, Some(admin)),
         );
 
         Ok(())
@@ -169,11 +165,7 @@ impl TrustBridgeContract {
 
         push_audit_entry(
             &env,
-            AuditLogEntry::new(
-                AuditEventType::AdminAction,
-                timestamp,
-                Some(admin),
-            ),
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(admin)),
         );
 
         Ok(())
@@ -208,11 +200,7 @@ impl TrustBridgeContract {
 
         push_audit_entry(
             &env,
-            AuditLogEntry::new(
-                AuditEventType::AdminAction,
-                timestamp,
-                Some(admin),
-            ),
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(admin)),
         );
 
         Ok(())
@@ -615,11 +603,7 @@ impl TrustBridgeContract {
         let timestamp = env.ledger().timestamp();
         push_audit_entry(
             &env,
-            AuditLogEntry::new(
-                AuditEventType::AdminAction,
-                timestamp,
-                Some(caller),
-            ),
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(caller)),
         );
 
         Ok(())
@@ -642,7 +626,6 @@ impl TrustBridgeContract {
     pub fn get_audit_stats(env: Env) -> AuditStats {
         get_audit_stats(&env)
     }
-
 
     /// Advances the on-chain schema version. Admin-only.
     ///
@@ -964,13 +947,9 @@ impl TrustBridgeContract {
 
             push_audit_entry(
                 &env,
-                AuditLogEntry::new(
-                    AuditEventType::UserRemoved,
-                    timestamp,
-                    Some(caller.clone()),
-                )
-                .with_username(username.clone())
-                .with_address(stellar_address),
+                AuditLogEntry::new(AuditEventType::UserRemoved, timestamp, Some(caller.clone()))
+                    .with_username(username.clone())
+                    .with_address(stellar_address),
             );
 
             successful = successful.saturating_add(1);
@@ -1050,13 +1029,9 @@ impl TrustBridgeContract {
 
         push_audit_entry(
             &env,
-            AuditLogEntry::new(
-                AuditEventType::UserRemoved,
-                timestamp,
-                Some(caller),
-            )
-            .with_username(github_username)
-            .with_address(stellar_address),
+            AuditLogEntry::new(AuditEventType::UserRemoved, timestamp, Some(caller))
+                .with_username(github_username)
+                .with_address(stellar_address),
         );
 
         Ok(())
@@ -1250,13 +1225,9 @@ impl TrustBridgeContract {
 
         push_audit_entry(
             &env,
-            AuditLogEntry::new(
-                AuditEventType::UserVerified,
-                timestamp,
-                Some(caller),
-            )
-            .with_username(github_username)
-            .with_address(record.stellar_address),
+            AuditLogEntry::new(AuditEventType::UserVerified, timestamp, Some(caller))
+                .with_username(github_username)
+                .with_address(record.stellar_address),
         );
 
         Ok(())
@@ -1340,7 +1311,6 @@ impl TrustBridgeContract {
 
         Ok(BatchSummary::new(total, successful))
     }
-
 
     /// Revokes verification for a registered contributor.
     ///
@@ -5201,19 +5171,18 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "user1"), user1.clone()).unwrap();
-            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user1")).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "user1"), user1.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user1"))
+                .unwrap();
         });
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             // user1: already verified -> fail
             // user2: not registered -> fail
-            let usernames = soroban_sdk::vec![
-                &env,
-                username(&env, "user1"),
-                username(&env, "user2"),
-            ];
+            let usernames =
+                soroban_sdk::vec![&env, username(&env, "user1"), username(&env, "user2"),];
             let summary =
                 TrustBridgeContract::batch_verify(env.clone(), admin.clone(), usernames).unwrap();
             assert_eq!(summary.total, 2);
@@ -5238,7 +5207,8 @@ mod test {
         env.as_contract(&contract_id, || {
             let usernames = soroban_sdk::vec![&env, username(&env, "user1")];
             let summary =
-                TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), usernames).unwrap();
+                TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), usernames)
+                    .unwrap();
             assert_eq!(summary.successful, 1);
         });
     }
@@ -5306,8 +5276,14 @@ mod test {
 
             let logs = TrustBridgeContract::get_audit_logs(env.clone());
             assert!(!logs.is_empty());
-            assert_eq!(logs.get(0).unwrap().event_type, AuditEventType::ContractInitialized);
-            assert_eq!(logs.get(1).unwrap().event_type, AuditEventType::UserRegistered);
+            assert_eq!(
+                logs.get(0).unwrap().event_type,
+                AuditEventType::ContractInitialized
+            );
+            assert_eq!(
+                logs.get(1).unwrap().event_type,
+                AuditEventType::UserRegistered
+            );
 
             let stats = TrustBridgeContract::get_audit_stats(env.clone());
             assert_eq!(stats.registrations, 1);
@@ -5330,7 +5306,8 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let res = TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
+            let res =
+                TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
             assert_eq!(res, Err(ContractError::NotAuthorized));
 
             let logs_len_after = TrustBridgeContract::get_audit_logs(env.clone()).len();
@@ -5355,7 +5332,10 @@ mod test {
                 2,
             );
             assert_eq!(res, Err(ContractError::NotAuthorized));
-            assert_eq!(TrustBridgeContract::get_verification_config(env.clone()), None);
+            assert_eq!(
+                TrustBridgeContract::get_verification_config(env.clone()),
+                None
+            );
         });
 
         // Admin caller succeeds
@@ -5396,7 +5376,11 @@ mod test {
                 .unwrap();
 
             // Immediate re-registration fails with CooldownActive
-            let res = TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user2.clone());
+            let res = TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user2.clone(),
+            );
             assert_eq!(res, Err(ContractError::CooldownActive));
         });
 
@@ -5411,5 +5395,3 @@ mod test {
         });
     }
 }
-
-

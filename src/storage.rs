@@ -753,4 +753,3 @@ pub fn get_audit_stats(env: &Env) -> crate::audit::AuditStats {
 pub fn set_audit_stats(env: &Env, stats: &crate::audit::AuditStats) {
     env.storage().instance().set(&AUDIT_STATS_KEY, stats);
 }
-
