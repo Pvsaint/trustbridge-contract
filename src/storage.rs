@@ -41,6 +41,10 @@ pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
 pub const PROV_KEY: Symbol = symbol_short!("prov");
 /// Key for the pending upgrade attestation (Wave #24).
 pub const ATTEST_KEY: Symbol = symbol_short!("attest");
+/// Key for audit log entries list.
+pub const AUDIT_LOG_KEY: Symbol = symbol_short!("adt_log");
+/// Key for audit stats.
+pub const AUDIT_STATS_KEY: Symbol = symbol_short!("adt_stat");
 
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
@@ -687,12 +691,66 @@ pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> b
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct VerificationConfig {
+    pub attestation: Symbol,
+    pub expires_in: u64,
+    pub threshold: u32,
+}
+
 pub fn is_verification_configured(env: &Env) -> bool {
     env.storage().instance().has(&VER_CFG_KEY)
 }
 
+pub fn get_verification_config(env: &Env) -> Option<VerificationConfig> {
+    env.storage().instance().get(&VER_CFG_KEY)
+}
+
 /// Stores the verification configuration. Idempotent — caller must gate
 /// on [`is_verification_configured`] first.
-pub fn set_verification_config(env: &Env, _attestation: Symbol, _expires_in: u64, _threshold: u32) {
-    env.storage().instance().set(&VER_CFG_KEY, &true);
+pub fn set_verification_config(env: &Env, attestation: Symbol, expires_in: u64, threshold: u32) {
+    let config = VerificationConfig {
+        attestation,
+        expires_in,
+        threshold,
+    };
+    env.storage().instance().set(&VER_CFG_KEY, &config);
 }
+
+// ── Audit log persistence ──────────────────────────────────────────────────
+
+pub const MAX_AUDIT_LOG_ENTRIES: u32 = 100;
+
+pub fn get_audit_logs(env: &Env) -> Vec<crate::audit::AuditLogEntry> {
+    env.storage()
+        .instance()
+        .get(&AUDIT_LOG_KEY)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn push_audit_entry(env: &Env, entry: crate::audit::AuditLogEntry) {
+    let mut logs = get_audit_logs(env);
+    let mut stats = get_audit_stats(env);
+
+    stats.record_event(entry.event_type);
+    set_audit_stats(env, &stats);
+
+    if logs.len() >= MAX_AUDIT_LOG_ENTRIES {
+        logs.pop_front();
+    }
+    logs.push_back(entry);
+    env.storage().instance().set(&AUDIT_LOG_KEY, &logs);
+}
+
+pub fn get_audit_stats(env: &Env) -> crate::audit::AuditStats {
+    env.storage()
+        .instance()
+        .get(&AUDIT_STATS_KEY)
+        .unwrap_or_default()
+}
+
+pub fn set_audit_stats(env: &Env, stats: &crate::audit::AuditStats) {
+    env.storage().instance().set(&AUDIT_STATS_KEY, stats);
+}
+

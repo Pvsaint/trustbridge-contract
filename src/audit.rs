@@ -1,34 +1,33 @@
-// Helper module staged ahead of its call sites: the items below are part of the
-// contract's internal toolkit and are covered by this module's own tests, but
-// are not yet wired into `lib.rs`.
-#![allow(dead_code)]
 /// Audit logging for tracking contract operations and admin actions.
 ///
 /// This module provides structured audit events for compliance and debugging,
 /// including admin actions, registrations, and verification events.
-use soroban_sdk::{Address, String};
+use soroban_sdk::{contracttype, Address, String};
 
 /// Types of audit events that can be recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracttype]
+#[repr(u32)]
 pub enum AuditEventType {
     /// Contract initialization
-    ContractInitialized,
+    ContractInitialized = 1,
     /// User registration
-    UserRegistered,
+    UserRegistered = 2,
     /// User removal (self or admin)
-    UserRemoved,
+    UserRemoved = 3,
     /// User verification
-    UserVerified,
+    UserVerified = 4,
     /// Admin action
-    AdminAction,
+    AdminAction = 5,
     /// Unauthorized access attempt
-    UnauthorizedAttempt,
+    UnauthorizedAttempt = 6,
     /// Data export (for dashboard sync)
-    DataExported,
+    DataExported = 7,
 }
 
 impl AuditEventType {
     /// Get a string representation of the event type.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             AuditEventType::ContractInitialized => "CONTRACT_INITIALIZED",
@@ -43,7 +42,8 @@ impl AuditEventType {
 }
 
 /// Structured audit log entry.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
 pub struct AuditLogEntry {
     pub event_type: AuditEventType,
     pub timestamp: u64,
@@ -55,6 +55,7 @@ pub struct AuditLogEntry {
 
 impl AuditLogEntry {
     /// Create a new audit log entry.
+    #[must_use]
     pub fn new(event_type: AuditEventType, timestamp: u64, actor: Option<Address>) -> Self {
         AuditLogEntry {
             event_type,
@@ -67,18 +68,21 @@ impl AuditLogEntry {
     }
 
     /// Add target username to the entry.
+    #[must_use]
     pub fn with_username(mut self, username: String) -> Self {
         self.target_username = Some(username);
         self
     }
 
     /// Add target address to the entry.
+    #[must_use]
     pub fn with_address(mut self, address: Address) -> Self {
         self.target_address = Some(address);
         self
     }
 
     /// Add details to the entry.
+    #[must_use]
     pub fn with_details(mut self, details: String) -> Self {
         self.details = Some(details);
         self
@@ -86,7 +90,8 @@ impl AuditLogEntry {
 }
 
 /// Configuration for audit logging.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracttype]
 pub struct AuditConfig {
     /// Whether audit logging is enabled
     pub enabled: bool,
@@ -96,17 +101,19 @@ pub struct AuditConfig {
     pub log_unauthorized: bool,
 }
 
-impl AuditConfig {
-    /// Create default audit configuration.
-    pub fn default() -> Self {
+impl Default for AuditConfig {
+    fn default() -> Self {
         AuditConfig {
             enabled: true,
             max_events: 1000,
             log_unauthorized: true,
         }
     }
+}
 
+impl AuditConfig {
     /// Create audit configuration with custom settings.
+    #[must_use]
     pub fn custom(enabled: bool, max_events: u32, log_unauthorized: bool) -> Self {
         AuditConfig {
             enabled,
@@ -118,6 +125,7 @@ impl AuditConfig {
 
 /// Audit event counter for statistics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracttype]
 pub struct AuditStats {
     pub total_events: u32,
     pub registrations: u32,
@@ -126,8 +134,15 @@ pub struct AuditStats {
     pub unauthorized_attempts: u32,
 }
 
+impl Default for AuditStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AuditStats {
     /// Create new empty statistics.
+    #[must_use]
     pub fn new() -> Self {
         AuditStats {
             total_events: 0,
@@ -150,3 +165,4 @@ impl AuditStats {
         }
     }
 }
+
