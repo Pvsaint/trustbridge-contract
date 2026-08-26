@@ -23,11 +23,13 @@ pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
 pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
 pub use error::ContractError;
 pub use events::{
-    PausedEvent, RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
+    ChallengeCancelledEvent, ChallengeCompletedEvent, ChallengeStartedEvent, PausedEvent,
+    RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ContributorRecord, ExportPage, Role, Stats, VerificationConfig, WasmAttestation, WasmProvenance,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
+    VerificationConfig, WasmAttestation, WasmProvenance,
 };
 pub use version::Version;
 
@@ -35,16 +37,18 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, 
 
 use crate::storage::{
     add_to_index, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
-    get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade, get_record,
-    get_registered_paginated_internal, get_role as storage_get_role, get_stats as read_stats,
-    get_verification_config, get_verified_count as storage_get_verified_count,
-    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_record,
-    is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
-    remove_from_index, remove_record, remove_role as storage_remove_role, remove_wasm_attestation,
-    require_initialized, require_not_paused, set_cooldown as storage_set_cooldown, set_count,
+    get_challenge, get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade,
+    get_record, get_registered_paginated_internal, get_role as storage_get_role,
+    get_stats as read_stats, get_verification_config, get_verified_count as storage_get_verified_count,
+    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
+    has_record, is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
+    remove_challenge, remove_from_index, remove_record, remove_role as storage_remove_role,
+    remove_wasm_attestation, require_initialized, require_not_paused,
+    run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
     set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
     set_record, set_role as storage_set_role, set_verified_count, set_version,
-    set_wasm_attestation, set_wasm_provenance, ADMIN_KEY,
+    set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
+    ADMIN_KEY,
 };
 
 use crate::utils::{
@@ -627,11 +631,21 @@ impl TrustBridgeContract {
         get_audit_stats(&env)
     }
 
-    /// Advances the on-chain schema version. Admin-only.
+    /// Advances the on-chain schema version and runs any applicable data-migration steps. Admin-only.
     ///
-    /// Used after an `upgrade` that changes the storage layout. `new_version` must
-    /// be strictly greater than the current stored version (semver order); downgrading
-    /// is rejected to prevent accidental rollback.
+    /// `new_version` must be strictly greater than the current stored version
+    /// (semver order); downgrading is rejected with `InvalidVersion`.
+    ///
+    /// For each registered migration step whose `from_version` falls in the
+    /// window `(current, new_version]` the step is executed exactly once.
+    /// Calling `migrate` again with the same `new_version` is a no-op because
+    /// `current == new_version` after the first run, which fails the strict
+    /// greater-than check.  Calling it with a later version only runs the
+    /// steps for that new gap — already-applied steps are skipped.
+    ///
+    /// **v1.0.0 → v1.1.0**: rewrites every `ContributorRecord` to normalise
+    /// the `registered_at` field from the legacy `u64` layout to `u32`.
+    /// Safe to run on a clean deployment (no records to touch ⇒ no writes).
     ///
     /// # Auth
     ///
@@ -654,6 +668,11 @@ impl TrustBridgeContract {
         if new_version <= current {
             return Err(ContractError::InvalidVersion);
         }
+
+        // Run every migration step that closes the gap between current and
+        // new_version.  The return value (steps applied) is informational and
+        // not stored — the version bump itself is the idempotency guard.
+        run_migration_steps(&env, current, new_version);
 
         set_version(&env, new_version);
         Ok(())
@@ -732,6 +751,7 @@ impl TrustBridgeContract {
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::InvalidUsername`] if `github_username` is not accepted.
     /// - [`ContractError::ZeroAddress`] if `stellar_address` is the zero/burn address.
+    /// - [`ContractError::ChallengeActive`] if a challenge is active on this username.
     pub fn register(
         env: Env,
         github_username: String,
@@ -751,6 +771,13 @@ impl TrustBridgeContract {
         // useful to dashboard/indexer consumers than an opaque auth failure.
         if is_zero_address(&env, &stellar_address) {
             return Err(ContractError::ZeroAddress);
+        }
+
+        // Block re-registration while a challenge is pending (Issue #214).
+        // The registrant's window to prove ownership off-chain must not be
+        // bypassed by simply re-registering to a new address.
+        if has_challenge(&env, &github_username) {
+            return Err(ContractError::ChallengeActive);
         }
 
         stellar_address.require_auth();
@@ -1020,6 +1047,9 @@ impl TrustBridgeContract {
             set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
         }
 
+        // If a challenge was active, clear it — the registrant beat the clock.
+        remove_challenge(&env, &github_username);
+
         RemovedEvent {
             github_username: github_username.clone(),
             stellar_address: stellar_address.clone(),
@@ -1197,6 +1227,9 @@ impl TrustBridgeContract {
         caller.require_auth();
 
         // Caller must be the admin OR hold the Verifier role.
+        // Note: Revoker role does NOT grant verify — roles are intentionally
+        // separated so a compromised Revoker cannot mark new accounts as
+        // verified (Issue #212).
         let is_admin = is_admin_caller(&env, &caller);
         let is_verifier = storage_get_role(&env, &caller) == Some(Role::Verifier);
         if !is_admin && !is_verifier {
@@ -1236,7 +1269,7 @@ impl TrustBridgeContract {
     /// Verifies multiple registered contributors in a single invocation.
     ///
     /// Callable by the contract admin **or** any address assigned the
-    /// `Role::Verifier` role.
+    /// `Role::Verifier` role. `Role::Revoker` does not grant this permission.
     ///
     /// # Auth
     ///
@@ -1314,6 +1347,11 @@ impl TrustBridgeContract {
 
     /// Revokes verification for a registered contributor.
     ///
+    /// Callable by the contract admin **or** any address assigned the
+    /// `Role::Revoker` role (Issue #212 — Verifier and Revoker are now
+    /// separate roles).  A `Role::Verifier` holder cannot revoke; a
+    /// `Role::Revoker` holder cannot verify.  Admin can do both.
+    ///
     /// `reason_code` must be one of the valid `RevokeReason` codes. See the
     /// `RevokeReason` enum for the supported values and their meanings.
     ///
@@ -1322,7 +1360,7 @@ impl TrustBridgeContract {
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::InvalidReasonCode`] if `reason_code` is not recognized.
-    /// - [`ContractError::NotAuthorized`] if `caller` is not an admin or verifier.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not an admin or revoker.
     /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
     /// - [`ContractError::NotVerified`] if the record is not currently verified.
     pub fn revoke_verification(
@@ -1341,10 +1379,12 @@ impl TrustBridgeContract {
 
         caller.require_auth();
 
-        // Caller must be the admin OR hold the Verifier role.
+        // Caller must be the admin OR hold the Revoker role (Issue #212).
+        // Verifier role is intentionally excluded: a compromised Verifier key
+        // should not be able to undo payout eligibility for existing users.
         let is_admin = is_admin_caller(&env, &caller);
-        let is_verifier = storage_get_role(&env, &caller) == Some(Role::Verifier);
-        if !is_admin && !is_verifier {
+        let is_revoker = storage_get_role(&env, &caller) == Some(Role::Revoker);
+        if !is_admin && !is_revoker {
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1388,7 +1428,255 @@ impl TrustBridgeContract {
         read_stats(&env)
     }
 
-    // --- Reference event indexer hardening: admin/pause/roles/cooldown (Wave #33) ---
+    /// Returns a single packed health snapshot for dashboards and CI probes (Issue #210).
+    ///
+    /// Combines pause state, schema version, registration counts, upgrade cooldown, and
+    /// attestation presence into one call so operators get a coherent view without five
+    /// separate RPC requests.
+    ///
+    /// Read-only, no auth required, and intentionally works while the contract is paused
+    /// — the snapshot is most useful precisely when something may be wrong.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    pub fn get_health(env: Env) -> Result<HealthSnapshot, ContractError> {
+        require_initialized(&env)?;
+
+        let paused = storage_is_paused(&env);
+        let ver = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+        let version = soroban_sdk::vec![&env, ver.0, ver.1, ver.2];
+        let stats = read_stats(&env);
+
+        let cooldown_secs = storage_get_cooldown(&env);
+        let now = env.ledger().timestamp();
+        let cooldown_remaining_secs = if cooldown_secs > 0 {
+            let last_upg = get_last_upgrade(&env);
+            let next_allowed = last_upg.saturating_add(cooldown_secs);
+            if now < next_allowed {
+                next_allowed - now
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let attestation_present = match get_wasm_attestation(&env) {
+            Some(a) => a.expires_at > now,
+            None => false,
+        };
+
+        Ok(HealthSnapshot {
+            paused,
+            version,
+            total: stats.total,
+            verified: stats.verified,
+            cooldown_secs,
+            cooldown_remaining_secs,
+            attestation_present,
+        })
+    }
+
+    // ── Challenge-period flow (Issue #214) ───────────────────────────────────
+
+    /// Starts a challenge on a registered username. Admin-only.
+    ///
+    /// Places the username in a locked state for `DEFAULT_CHALLENGE_DELAY_SECS`
+    /// (48 hours). While the challenge is active:
+    ///
+    /// - Re-registration is blocked (`ChallengeActive`).
+    /// - The current registrant can still remove their own record (self-remove
+    ///   via `remove`), which clears the challenge atomically.
+    /// - `complete_challenge` is gated behind the delay so the registrant has
+    ///   time to prove GitHub ownership off-chain.
+    ///
+    /// Emits [`ChallengeStartedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
+    /// - [`ContractError::ChallengeAlreadyActive`] if a challenge is already open.
+    pub fn start_challenge(
+        env: Env,
+        caller: Address,
+        github_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        if !has_record(&env, &github_username) {
+            return Err(ContractError::NotRegistered);
+        }
+
+        if has_challenge(&env, &github_username) {
+            return Err(ContractError::ChallengeAlreadyActive);
+        }
+
+        let now = env.ledger().timestamp();
+        let resolve_after = now.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS);
+
+        set_challenge(
+            &env,
+            &github_username,
+            &ChallengeRecord {
+                challenged_by: caller.clone(),
+                started_at: now,
+                resolve_after,
+            },
+        );
+
+        ChallengeStartedEvent {
+            github_username,
+            challenged_by: caller,
+            resolve_after,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels a pending challenge. Admin-only.
+    ///
+    /// Removes the lock unconditionally, freeing the username for re-registration.
+    /// Use this when an off-chain review concludes the registrant is legitimate.
+    ///
+    /// Emits [`ChallengeCancelledEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    /// - [`ContractError::NoChallengeActive`] if there is no active challenge.
+    pub fn cancel_challenge(
+        env: Env,
+        caller: Address,
+        github_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        if !has_challenge(&env, &github_username) {
+            return Err(ContractError::NoChallengeActive);
+        }
+
+        remove_challenge(&env, &github_username);
+
+        let timestamp = env.ledger().timestamp();
+        ChallengeCancelledEvent {
+            github_username,
+            cancelled_by: caller,
+            timestamp,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Completes a challenge and removes the squatted registration. Admin-only.
+    ///
+    /// May only be called after `resolve_after` has passed. Removes the
+    /// registration, clears the challenge, decrements the counts, and publishes
+    /// both a [`ChallengeCompletedEvent`] and a [`RemovedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    /// - [`ContractError::NoChallengeActive`] if there is no pending challenge.
+    /// - [`ContractError::ChallengeNotResolvable`] if the delay has not elapsed.
+    /// - [`ContractError::NotRegistered`] if the record was removed during the challenge window.
+    pub fn complete_challenge(
+        env: Env,
+        caller: Address,
+        github_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let challenge =
+            get_challenge(&env, &github_username).ok_or(ContractError::NoChallengeActive)?;
+
+        let now = env.ledger().timestamp();
+        if now < challenge.resolve_after {
+            return Err(ContractError::ChallengeNotResolvable);
+        }
+
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
+        // Remove the registration.
+        remove_record(&env, &github_username);
+        remove_from_index(&env, &github_username);
+        set_count(&env, get_count(&env).saturating_sub(1));
+        if record.verified {
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+        }
+
+        remove_challenge(&env, &github_username);
+
+        RemovedEvent {
+            github_username: github_username.clone(),
+            stellar_address: record.stellar_address.clone(),
+            timestamp: now,
+        }
+        .publish(&env);
+
+        ChallengeCompletedEvent {
+            github_username,
+            completed_by: caller,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the pending challenge record for a username, if any.
+    ///
+    /// Read-only; no auth required. Returns `None` if there is no active challenge.
+    #[must_use]
+    pub fn get_challenge(env: Env, github_username: String) -> Option<ChallengeRecord> {
+        get_challenge(&env, &github_username)
+    }
 
     /// Returns whether the contract is currently paused.
     ///
@@ -2570,13 +2858,17 @@ mod test {
     }
 
     /// Verifier-role caller can revoke (Issue #12).
+    /// Updated for Issue #212: Verifier can no longer revoke — that now
+    /// requires Role::Revoker. This test verifies the old Verifier-can-revoke
+    /// path correctly fails and that Role::Revoker succeeds.
     #[test]
     fn test_verifier_role_can_revoke_verification() {
         let env = Env::default();
-        let (admin, user, verifier, contract_id) = setup(&env);
+        let (admin, user, revoker, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+            // Assign Revoker role, not Verifier.
+            TrustBridgeContract::set_role(env.clone(), revoker.clone(), Role::Revoker).unwrap();
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
@@ -2592,7 +2884,7 @@ mod test {
         env.as_contract(&contract_id, || {
             TrustBridgeContract::revoke_verification(
                 env.clone(),
-                verifier.clone(),
+                revoker.clone(),
                 username(&env, "octocat"),
                 1,
             )
@@ -2850,14 +3142,16 @@ mod test {
             ContractError::InvalidBatchSize,
             ContractError::InvalidReasonCode,
             ContractError::ZeroAddress,
+            ContractError::ChallengeAlreadyActive,
+            ContractError::NoChallengeActive,
+            ContractError::ChallengeNotResolvable,
+            ContractError::ChallengeActive,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 17 is one past the highest assigned variant (ZeroAddress = 16):
-        // the first code guaranteed not to collide with a real variant as the
-        // enum grows, unlike a fixed gap in the middle of the table.
-        assert_eq!(ContractError::from_code(17), None);
+        // 21 is one past the highest assigned variant (ChallengeActive = 20):
+        assert_eq!(ContractError::from_code(21), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -3452,6 +3746,10 @@ mod test {
             ContractError::InvalidBatchSize,
             ContractError::InvalidReasonCode,
             ContractError::ZeroAddress,
+            ContractError::ChallengeAlreadyActive,
+            ContractError::NoChallengeActive,
+            ContractError::ChallengeNotResolvable,
+            ContractError::ChallengeActive,
         ];
         for variant in all {
             assert_eq!(ContractError::from_code(variant as u32), Some(variant));
@@ -3462,7 +3760,7 @@ mod test {
     #[test]
     fn test_from_code_unknown_returns_none() {
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(17), None);
+        assert_eq!(ContractError::from_code(21), None);
         assert_eq!(ContractError::from_code(u32::MAX), None);
     }
 
@@ -4562,14 +4860,16 @@ mod test {
         });
     }
 
-    /// #114-R7 (happy path): Verifier-role address can revoke verification.
+    /// #114-R7 (happy path): Revoker-role address can revoke verification (Issue #212).
+    /// Updated from Verifier to Revoker — roles are now split.
     #[test]
     fn test_revoke_positive_verifier_role_can_revoke() {
         let env = Env::default();
-        let (admin, user, verifier, contract_id) = setup(&env);
+        let (admin, user, revoker, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+            // Use Revoker role, not Verifier (Issue #212).
+            TrustBridgeContract::set_role(env.clone(), revoker.clone(), Role::Revoker).unwrap();
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
@@ -4579,7 +4879,7 @@ mod test {
                 .unwrap();
             TrustBridgeContract::revoke_verification(
                 env.clone(),
-                verifier.clone(),
+                revoker.clone(),
                 username(&env, "octocat"),
                 1,
             )
@@ -4588,7 +4888,7 @@ mod test {
                 !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
                     .unwrap()
                     .verified,
-                "Verifier-role revoke must clear verified=false"
+                "Revoker-role revoke must clear verified=false"
             );
         });
     }

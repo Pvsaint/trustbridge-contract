@@ -59,6 +59,15 @@ pub enum ContractError {
     InvalidReasonCode = 15,
     /// The supplied Stellar address is the well-known zero/burn address.
     ZeroAddress = 16,
+    /// A challenge is already active for this username (Issue #214).
+    ChallengeAlreadyActive = 17,
+    /// No challenge is active for this username (Issue #214).
+    NoChallengeActive = 18,
+    /// The challenge delay has not elapsed yet (Issue #214).
+    ChallengeNotResolvable = 19,
+    /// Operation is blocked because a challenge is active on this username
+    /// (Issue #214).
+    ChallengeActive = 20,
 }
 
 impl ContractError {
@@ -90,6 +99,10 @@ impl ContractError {
             14 => Some(ContractError::InvalidBatchSize),
             15 => Some(ContractError::InvalidReasonCode),
             16 => Some(ContractError::ZeroAddress),
+            17 => Some(ContractError::ChallengeAlreadyActive),
+            18 => Some(ContractError::NoChallengeActive),
+            19 => Some(ContractError::ChallengeNotResolvable),
+            20 => Some(ContractError::ChallengeActive),
             _ => None,
         }
     }
