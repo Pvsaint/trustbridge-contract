@@ -101,6 +101,10 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::InvalidBatchSize => ErrorCategory::Validation,
         ContractError::InvalidReasonCode => ErrorCategory::Validation,
         ContractError::ZeroAddress => ErrorCategory::Validation,
+        ContractError::ChallengeAlreadyActive => ErrorCategory::Validation,
+        ContractError::NoChallengeActive => ErrorCategory::Validation,
+        ContractError::ChallengeNotResolvable => ErrorCategory::Transient,
+        ContractError::ChallengeActive => ErrorCategory::Transient,
     }
 }
 

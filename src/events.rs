@@ -92,6 +92,38 @@ pub struct RoleRevokedEvent {
     pub timestamp: u64,
 }
 
+/// Emitted when an admin starts a challenge on a squatted username (Issue #214).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeStartedEvent {
+    #[topic]
+    pub github_username: String,
+    pub challenged_by: Address,
+    pub resolve_after: u64,
+    pub timestamp: u64,
+}
+
+/// Emitted when an admin cancels a pending challenge (Issue #214).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeCancelledEvent {
+    #[topic]
+    pub github_username: String,
+    pub cancelled_by: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when an admin completes a challenge and removes the squatted
+/// registration (Issue #214).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChallengeCompletedEvent {
+    #[topic]
+    pub github_username: String,
+    pub completed_by: Address,
+    pub timestamp: u64,
+}
+
 #[cfg(test)]
 mod test {
     use crate::{TrustBridgeContract, TrustBridgeContractClient};
